@@ -49,7 +49,7 @@ async def test_register_duplicate_email(client: AsyncClient, test_user_data: dic
     resp = await _register(client, test_user_data)
     assert resp.status_code == 409, resp.text
     body = resp.json()
-    assert body["detail"]["error"]["code"] == "EMAIL_ALREADY_EXISTS"
+    assert body["error"]["code"] == "EMAIL_ALREADY_EXISTS"
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_login_wrong_password(client: AsyncClient, test_user_data: dict):
 
     resp = await _login(client, data["email"], "wrongpassword!")
     assert resp.status_code == 401, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "INVALID_CREDENTIALS"
+    assert resp.json()["error"]["code"] == "INVALID_CREDENTIALS"
 
 
 @pytest.mark.asyncio
@@ -96,7 +96,7 @@ async def test_login_unknown_email(client: AsyncClient):
     """Login with a non-existent email must return 401."""
     resp = await _login(client, "nobody@example.com", "somepassword")
     assert resp.status_code == 401, resp.text
-    assert resp.json()["detail"]["error"]["code"] == "INVALID_CREDENTIALS"
+    assert resp.json()["error"]["code"] == "INVALID_CREDENTIALS"
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ async def test_refresh_token_reuse_fails(client: AsyncClient, test_user_data: di
     # Second use with the *same* original token – must fail
     second = await client.post("/refresh", json={"refresh_token": original_refresh})
     assert second.status_code == 401, second.text
-    code = second.json()["detail"]["error"]["code"]
+    code = second.json()["error"]["code"]
     assert code in ("REFRESH_TOKEN_REUSE", "INVALID_REFRESH_TOKEN")
 
 

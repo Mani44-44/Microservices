@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
@@ -80,6 +80,33 @@ async def correlation_id_middleware(request: Request, call_next):
         response = await call_next(request)
         response.headers["X-Correlation-ID"] = correlation_id
     return response
+
+
+# ---------------------------------------------------------------------------
+# HTTPException handler — unwrap {"error": {...}} details into a top-level
+# envelope instead of FastAPI's default {"detail": ...} wrapping.
+# ---------------------------------------------------------------------------
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    correlation_id = getattr(request.state, "correlation_id", None) or request.headers.get(
+        "X-Correlation-ID", str(uuid.uuid4())
+    )
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        content = exc.detail
+        if not content["error"].get("correlation_id"):
+            content["error"]["correlation_id"] = correlation_id
+    else:
+        content = {
+            "error": {
+                "code": "HTTP_ERROR",
+                "message": str(exc.detail),
+                "details": {},
+                "correlation_id": correlation_id,
+            }
+        }
+    return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
 
 
 # ---------------------------------------------------------------------------
