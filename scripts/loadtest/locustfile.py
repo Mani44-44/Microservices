@@ -231,7 +231,10 @@ class TicketFlowUser(HttpUser):
                 resp.success()
                 booking_id = resp.json()["id"]
             elif resp.status_code in (409, 429):
-                # 409: seat already locked by another concurrent user.
+                # 409: seat already locked by another concurrent user
+                #      (SEAT_ALREADY_LOCKED) or already sold (SEAT_ALREADY_BOOKED).
+                #      The seat pool is fetched once, and sold seats stay sold,
+                #      so a long run sees a growing share of SEAT_ALREADY_BOOKED.
                 # 429: per-user/per-IP rate limit tripped.
                 # Both are expected, correct behavior under load, not failures.
                 resp.success()

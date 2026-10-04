@@ -1,5 +1,11 @@
 # TicketFlow Gateway — Locust Load Test Results
 
+> **Note (2026-10-05):** these numbers were captured before booking-service started
+> recording sold seats (`seat_reservations`), failing closed on seat pricing, and
+> returning 503 `PAYMENT_STATUS_UNKNOWN` instead of FAILED on payment timeouts.
+> Confirmed seats can no longer be re-locked, so a re-run will show more lock 409s
+> as the seed pool sells out. These results have not been re-captured since.
+
 Date: 2026-08-30. Target: `http://localhost:8000` (the `gateway` service), plus
 `http://localhost:8007` for the one journey step that the gateway does not
 proxy (see below). Ran against the live 13-service docker-compose stack on

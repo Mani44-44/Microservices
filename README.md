@@ -398,7 +398,7 @@ pytest services/ --cov=app --cov-report=term-missing
 
 `scripts/loadtest/locustfile.py` models one realistic user journey: register/login → browse catalog → lock + confirm/release a seat → check booking status → occasionally hit the support agent for a refund. Full methodology and numbers: [`docs/load-test-results.md`](docs/load-test-results.md).
 
-A follow-up chaos run killed the Redpanda broker mid-load (`docker stop redpanda` for ~5s, 30 concurrent users): **zero visible request failures** on any booking/auth/agent-chat path — booking-service treats the event publish as fire-and-forget from the caller's perspective, so a broker blip doesn't fail a booking. Full results: [`docs/load-chaos-results.md`](docs/load-chaos-results.md).
+A follow-up chaos run killed the Redpanda broker mid-load (`docker stop redpanda` for ~5s, 30 concurrent users): **zero visible request failures** on any booking/auth/agent-chat path — booking-service treats the event publish as fire-and-forget from the caller's perspective, so a broker blip doesn't fail a booking. Full results: [`docs/load-chaos-results.md`](docs/load-chaos-results.md). (Both result sets predate the booking-correctness changes described under [Notes & Known Issues](#notes--known-issues) and have not been re-captured.)
 
 Two standalone chaos scripts are also available for manual exercising:
 

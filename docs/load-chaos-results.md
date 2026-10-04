@@ -1,5 +1,11 @@
 # Load + Chaos Test: Redpanda Broker Kill During Active Load
 
+> **Note (2026-10-05):** these numbers were captured before booking-service started
+> recording sold seats (`seat_reservations`), failing closed on seat pricing, and
+> returning 503 `PAYMENT_STATUS_UNKNOWN` instead of FAILED on payment timeouts.
+> Confirmed seats can no longer be re-locked, so a re-run will show more lock 409s
+> as the seed pool sells out. These results have not been re-captured since.
+
 ## What was run
 
 `scripts/loadtest/locustfile.py`, headless, 30 users, spawn rate 5/s, 60s run,
