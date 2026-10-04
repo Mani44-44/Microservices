@@ -82,7 +82,7 @@ async def _get_seat_price(
     """
     url = f"{settings.catalog_service_url}/events/{event_id}/seats/{seat_id}"
     try:
-        resp = await http_client.get(url, timeout=5.0)
+        resp = await http_client.get(url, params={"include_status": "false"}, timeout=5.0)
     except httpx.HTTPError as exc:
         log.warning("catalog_service_unavailable", error=str(exc), seat_id=str(seat_id))
         raise _error(

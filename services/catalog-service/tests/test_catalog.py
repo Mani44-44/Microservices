@@ -178,3 +178,92 @@ async def test_health(client: AsyncClient):
     assert data["service"] == "catalog-service"
     assert "checks" in data
     assert "database" in data["checks"]
+
+
+# ---------------------------------------------------------------------------
+# Seat validity and sold-seat status
+# ---------------------------------------------------------------------------
+
+
+def _booking_service_returning(locked=(), booked=()):
+    from unittest.mock import AsyncMock, MagicMock
+
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {
+        "locked_seat_ids": [str(s) for s in locked],
+        "booked_seat_ids": [str(s) for s in booked],
+    }
+    client = AsyncMock()
+    client.get.return_value = resp
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    return client
+
+
+async def test_get_seat_rejects_seat_from_another_venue(client: AsyncClient, db, published_event: Event):
+    from app.models import Seat, Section
+
+    other_venue = Venue(id=uuid.uuid4(), name="Elsewhere", city="LA", country="US", capacity=10)
+    db.add(other_venue)
+    await db.flush()
+    section = Section(id=uuid.uuid4(), venue_id=other_venue.id, name="GA", capacity=10)
+    db.add(section)
+    await db.flush()
+    foreign_seat = Seat(id=uuid.uuid4(), section_id=section.id, seat_number="1", row_number="Z")
+    db.add(foreign_seat)
+    await db.commit()
+
+    resp = await client.get(f"/events/{published_event.id}/seats/{foreign_seat.id}")
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "SEAT_NOT_FOUND"
+
+
+async def test_seat_map_reports_booked_and_locked_seats(
+    client: AsyncClient, venue: Venue, published_event: Event
+):
+    from unittest.mock import patch
+
+    locked_seat, booked_seat = venue._floor_seats[0], venue._floor_seats[1]
+    booking_service = _booking_service_returning(locked=[locked_seat.id], booked=[booked_seat.id])
+    with patch("app.routes.events.httpx.AsyncClient", return_value=booking_service):
+        resp = await client.get(f"/events/{published_event.id}/seats")
+
+    statuses = {
+        seat["id"]: seat["status"]
+        for section in resp.json()["sections"]
+        for seat in section["seats"]
+    }
+    assert statuses[str(locked_seat.id)] == "locked"
+    assert statuses[str(booked_seat.id)] == "booked"
+    assert statuses[str(venue._floor_seats[2].id)] == "available"
+
+
+async def test_get_seat_reports_booked(client: AsyncClient, venue: Venue, published_event: Event):
+    from unittest.mock import patch
+
+    seat = venue._floor_seats[0]
+    with patch(
+        "app.routes.events.httpx.AsyncClient",
+        return_value=_booking_service_returning(booked=[seat.id]),
+    ):
+        resp = await client.get(f"/events/{published_event.id}/seats/{seat.id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "booked"
+    assert resp.json()["price"] == "200.00"
+
+
+async def test_get_seat_can_skip_status_lookup(client: AsyncClient, venue: Venue, published_event: Event):
+    """Booking-service only needs the price; skip the call back into it."""
+    from unittest.mock import patch
+
+    seat = venue._floor_seats[0]
+    with patch("app.routes.events.httpx.AsyncClient") as client_cls:
+        resp = await client.get(
+            f"/events/{published_event.id}/seats/{seat.id}", params={"include_status": "false"}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["price"] == "200.00"
+    client_cls.assert_not_called()

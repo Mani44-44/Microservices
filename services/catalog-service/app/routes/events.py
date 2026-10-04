@@ -36,14 +36,15 @@ settings = get_settings()
 
 
 # ---------------------------------------------------------------------------
-# Helper – fetch locked seat IDs from booking service
+# Helper – fetch locked / sold seat IDs from booking service
 # ---------------------------------------------------------------------------
 
 
-async def _get_locked_seat_ids(event_id: uuid.UUID) -> set[str]:
+async def _get_unavailable_seat_ids(event_id: uuid.UUID) -> tuple[set[str], set[str]]:
     """
-    Call the booking service to retrieve currently locked seat IDs for an event.
-    Returns an empty set on any connection or HTTP error (treat all seats as available).
+    Call the booking service to retrieve (locked, booked) seat IDs for an event.
+    Returns two empty sets on any connection or HTTP error (treat all seats as
+    available — booking-service itself still refuses to sell a taken seat).
     """
     url = f"{settings.booking_service_url}/internal/events/{event_id}/locked-seats"
     try:
@@ -51,15 +52,22 @@ async def _get_locked_seat_ids(event_id: uuid.UUID) -> set[str]:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = resp.json()
-                # Expect {"locked_seat_ids": ["uuid", ...]}
-                return set(data.get("locked_seat_ids", []))
-    except (httpx.ConnectError, httpx.TimeoutException, Exception) as exc:
+                return set(data.get("locked_seat_ids", [])), set(data.get("booked_seat_ids", []))
+    except Exception as exc:
         logger.warning(
             "booking_service_unreachable",
             event_id=str(event_id),
             error=str(exc),
         )
-    return set()
+    return set(), set()
+
+
+def _seat_status(seat_id: str, locked: set[str], booked: set[str]) -> SeatStatus:
+    if seat_id in booked:
+        return SeatStatus.booked
+    if seat_id in locked:
+        return SeatStatus.locked
+    return SeatStatus.available
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +218,8 @@ async def get_seat_map(
         for esp in prices_result.scalars().all()
     }
 
-    # Fetch locked seat IDs from booking service (may return empty set)
-    locked_ids = await _get_locked_seat_ids(event_id)
+    # Fetch locked/sold seat IDs from booking service (may return empty sets)
+    locked_ids, booked_ids = await _get_unavailable_seat_ids(event_id)
 
     # Build seat map
     section_groups: list[SeatSectionGroup] = []
@@ -220,11 +228,6 @@ async def get_seat_map(
         for seat in section.seats:
             seat_id_str = str(seat.id)
             price = price_map.get(seat_id_str, Decimal(str(event.base_price or "0.00")))
-
-            if seat_id_str in locked_ids:
-                seat_status = SeatStatus.locked
-            else:
-                seat_status = SeatStatus.available
 
             seat_responses.append(
                 SeatResponse(
@@ -235,7 +238,7 @@ async def get_seat_map(
                     section_id=section.id,
                     section_name=section.name,
                     price=price,
-                    status=seat_status,
+                    status=_seat_status(seat_id_str, locked_ids, booked_ids),
                 )
             )
 
@@ -261,6 +264,11 @@ async def get_seat_map(
 async def get_seat(
     event_id: uuid.UUID,
     seat_id: uuid.UUID,
+    include_status: bool = Query(
+        default=True,
+        description="Look up live locked/booked status from booking-service. "
+        "Booking-service passes false when it only needs the price.",
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> SeatResponse:
     """Return the status and price for a single seat at an event."""
@@ -286,7 +294,8 @@ async def get_seat(
         .where(Seat.id == seat_id)
     )
     seat = seat_result.scalar_one_or_none()
-    if not seat:
+    # A seat from a different venue is not part of this event.
+    if not seat or seat.section.venue_id != event.venue_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -313,10 +322,10 @@ async def get_seat(
     )
 
     # Get status from booking service
-    locked_ids = await _get_locked_seat_ids(event_id)
-    seat_status = (
-        SeatStatus.locked if str(seat_id) in locked_ids else SeatStatus.available
-    )
+    seat_status = SeatStatus.available
+    if include_status:
+        locked_ids, booked_ids = await _get_unavailable_seat_ids(event_id)
+        seat_status = _seat_status(str(seat_id), locked_ids, booked_ids)
 
     return SeatResponse(
         id=seat.id,
