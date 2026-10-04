@@ -52,6 +52,9 @@ async def _expiry_loop(app: FastAPI) -> None:
 async def lifespan(app: FastAPI):
     log.info("booking_service_startup", service=settings.service_name)
     await init_db()
+    import app.booking_service as svc
+
+    await svc.backfill_seat_reservations(async_session_factory)
     app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     expiry_task = asyncio.create_task(_expiry_loop(app))
 

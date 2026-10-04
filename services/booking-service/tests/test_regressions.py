@@ -418,3 +418,50 @@ async def test_confirm_fails_without_charging_when_seat_already_sold(
     payment.post.assert_not_called()
     async with file_session_factory() as db:
         assert (await db.get(Booking, uuid.UUID(second.json()["id"]))).status == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Backfill: bookings confirmed before seat_reservations existed
+# ---------------------------------------------------------------------------
+
+
+async def _seed_confirmed_booking(factory, event_id, seat_id) -> uuid.UUID:
+    now = datetime.now(timezone.utc)
+    booking_id = uuid.uuid4()
+    async with factory() as db:
+        db.add(
+            Booking(
+                id=booking_id,
+                user_id=uuid.uuid4(),
+                event_id=event_id,
+                status="CONFIRMED",
+                total_amount=50,
+                currency="USD",
+                locked_at=now,
+                expires_at=now,
+                confirmed_at=now,
+            )
+        )
+        db.add(BookingSeat(booking_id=booking_id, seat_id=seat_id, price_at_booking=50))
+        await db.commit()
+    return booking_id
+
+
+async def test_backfill_reserves_seats_of_previously_confirmed_bookings(
+    committing_client, file_session_factory
+):
+    from app.booking_service import backfill_seat_reservations
+
+    event_id, seat_id, other_seat = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _seed_confirmed_booking(file_session_factory, event_id, seat_id)
+    # Historical data may already contain a double sale; it must not crash startup.
+    await _seed_confirmed_booking(file_session_factory, event_id, seat_id)
+    await _seed_confirmed_booking(file_session_factory, event_id, other_seat)
+
+    assert await backfill_seat_reservations(file_session_factory) == 2
+    assert await backfill_seat_reservations(file_session_factory) == 0  # idempotent
+
+    for seat in (seat_id, other_seat):
+        resp = await _lock(committing_client, uuid.uuid4(), event_id, [seat])
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "SEAT_ALREADY_BOOKED"

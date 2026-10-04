@@ -881,3 +881,61 @@ async def run_expiry_once(session_factory, lock_manager: LockManager) -> int:
         expired = await expire_pending_bookings(db, lock_manager)
         await db.commit()
     return expired
+
+
+# ---------------------------------------------------------------------------
+# 8. Startup backfill
+# ---------------------------------------------------------------------------
+
+
+async def backfill_seat_reservations(session_factory) -> int:
+    """Reserve the seats of CONFIRMED bookings that predate seat_reservations.
+
+    `create_all` adds the seat_reservations table empty to an existing
+    database, which would let every already-sold seat be sold again. Run at
+    startup; idempotent. If historical data already sold a seat twice, the
+    first booking keeps the reservation and the conflict is logged.
+
+    Returns the number of reservations created.
+    """
+    async with session_factory() as db:
+        already_reserved = (
+            select(SeatReservation.id)
+            .where(SeatReservation.event_id == Booking.event_id)
+            .where(SeatReservation.seat_id == BookingSeat.seat_id)
+            .exists()
+        )
+        rows = (
+            await db.execute(
+                select(Booking.id, Booking.event_id, BookingSeat.seat_id)
+                .join(BookingSeat, BookingSeat.booking_id == Booking.id)
+                .where(Booking.status == "CONFIRMED")
+                .where(~already_reserved)
+                .order_by(Booking.confirmed_at, Booking.id)
+            )
+        ).all()
+
+        claimed: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        for booking_id, event_id, seat_id in rows:
+            if (event_id, seat_id) in claimed:
+                log.error(
+                    "backfill_seat_double_sold",
+                    event_id=str(event_id),
+                    seat_id=str(seat_id),
+                    booking_id=str(booking_id),
+                )
+                continue
+            claimed.add((event_id, seat_id))
+            db.add(SeatReservation(event_id=event_id, seat_id=seat_id, booking_id=booking_id))
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Another replica backfilled concurrently; its rows win.
+            await db.rollback()
+            log.warning("backfill_seat_reservations_conflict")
+            return 0
+
+    if claimed:
+        log.info("seat_reservations_backfilled", count=len(claimed))
+    return len(claimed)
