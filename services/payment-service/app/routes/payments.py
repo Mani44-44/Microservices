@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -148,7 +149,11 @@ async def confirm_payment(
         correlation_id=correlation_id,
     )
 
-    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    # Row-lock so two concurrent requests can't both act on the same
+    # PENDING/SUCCEEDED payment (double charge / double refund).
+    result = await db.execute(
+        select(Payment).where(Payment.id == payment_id).with_for_update()
+    )
     payment = result.scalar_one_or_none()
     if not payment:
         raise HTTPException(
@@ -328,7 +333,11 @@ async def refund_payment(
         correlation_id=correlation_id,
     )
 
-    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    # Row-lock so two concurrent requests can't both act on the same
+    # PENDING/SUCCEEDED payment (double charge / double refund).
+    result = await db.execute(
+        select(Payment).where(Payment.id == payment_id).with_for_update()
+    )
     payment = result.scalar_one_or_none()
     if not payment:
         raise HTTPException(
@@ -356,7 +365,7 @@ async def refund_payment(
             },
         )
 
-    if float(body.amount) > float(payment.amount):
+    if Decimal(body.amount) > Decimal(payment.amount):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
