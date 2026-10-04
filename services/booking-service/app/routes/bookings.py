@@ -96,6 +96,27 @@ async def release_booking_endpoint(
     return BookingResponse.model_validate(booking)
 
 
+@router.post(
+    "/{booking_id}/cancel",
+    response_model=BookingResponse,
+    summary="Cancel a confirmed booking and return its seats to sale (refund path)",
+)
+async def cancel_booking_endpoint(
+    booking_id: uuid.UUID,
+    request: Request,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    log.info(
+        "cancel_booking_request",
+        booking_id=str(booking_id),
+        user_id=str(user_id),
+        correlation_id=request.state.correlation_id,
+    )
+    booking = await svc.cancel_confirmed_booking(booking_id, user_id, db)
+    return BookingResponse.model_validate(booking)
+
+
 @router.get(
     "/{booking_id}",
     response_model=BookingResponse,

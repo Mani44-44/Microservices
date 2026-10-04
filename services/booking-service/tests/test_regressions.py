@@ -374,7 +374,8 @@ async def test_cancel_confirmed_booking_frees_seat(client):
     assert relock.status_code == 201
 
 
-async def test_cancel_requires_ownership_and_confirmed_status(client):
+async def test_cancel_requires_ownership_and_confirmed_status(committing_client):
+    client = committing_client
     owner = uuid.uuid4()
     lock = await _lock(client, owner)
     booking_id = lock.json()["id"]
@@ -387,3 +388,33 @@ async def test_cancel_requires_ownership_and_confirmed_status(client):
         f"/bookings/{booking_id}/cancel", headers=auth_headers(uuid.uuid4())
     )
     assert stranger.status_code == 403
+
+
+async def test_confirm_fails_without_charging_when_seat_already_sold(
+    committing_client, file_session_factory, fake_redis
+):
+    """If Redis lost a lock (e.g. a restart) and two PENDING bookings hold the
+    same seat, the DB reservation constraint stops the second sale before any
+    payment call is made."""
+    client = committing_client
+    event_id, seat_id = uuid.uuid4(), uuid.uuid4()
+    first_owner, second_owner = uuid.uuid4(), uuid.uuid4()
+
+    first = await _lock(client, first_owner, event_id, [seat_id])
+    await fake_redis.flushall()  # simulate Redis losing every lock
+    second = await _lock(client, second_owner, event_id, [seat_id])
+    assert second.status_code == 201
+
+    await fake_redis.set(f"seat_lock:{event_id}:{seat_id}", str(first_owner), ex=300)
+    confirmed = await _confirm(client, first.json()["id"], first_owner, _successful_payment())
+    assert confirmed.json()["status"] == "CONFIRMED"
+
+    await fake_redis.set(f"seat_lock:{event_id}:{seat_id}", str(second_owner), ex=300)
+    payment = _payment_client()
+    resp = await _confirm(client, second.json()["id"], second_owner, payment)
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "SEAT_ALREADY_BOOKED"
+    payment.post.assert_not_called()
+    async with file_session_factory() as db:
+        assert (await db.get(Booking, uuid.UUID(second.json()["id"]))).status == "FAILED"

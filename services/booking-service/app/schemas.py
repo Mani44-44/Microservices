@@ -93,3 +93,5 @@ class LockedSeatsResponse(BaseModel):
     event_id: UUID
     locked_seat_ids: List[str]
     count: int
+    # Seats sold to a confirmed booking (no longer held in Redis).
+    booked_seat_ids: List[str] = []

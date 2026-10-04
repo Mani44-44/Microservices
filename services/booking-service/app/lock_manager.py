@@ -55,6 +55,23 @@ end
 return released
 """
 
+# Atomically extend the TTL of all seat locks, but only if *every* lock is
+# still owned by user. Returns 1 on success, 0 (and extends nothing) if any
+# lock has expired or now belongs to someone else.
+EXTEND_SEATS_SCRIPT = """
+local user_id = ARGV[1]
+local ttl = tonumber(ARGV[2])
+for i = 1, #KEYS do
+    if redis.call('GET', KEYS[i]) ~= user_id then
+        return 0
+    end
+end
+for i = 1, #KEYS do
+    redis.call('EXPIRE', KEYS[i], ttl)
+end
+return 1
+"""
+
 # Get lock info for multiple seats in a single round-trip.
 # Returns a flat list: [locked_by_1, ttl_1, locked_by_2, ttl_2, ...]
 GET_LOCKS_SCRIPT = """
@@ -181,25 +198,6 @@ class LockManager:
             log.error("redis_release_error", error=str(exc))
             raise
 
-    async def release_seats_admin(
-        self,
-        event_id: uuid.UUID,
-        seat_ids: List[uuid.UUID],
-    ) -> int:
-        """Force-release seat locks regardless of owner (used by expiry handler)."""
-        pipe = self.redis.pipeline()
-        for seat_id in seat_ids:
-            key = self._seat_lock_key(event_id, seat_id)
-            pipe.delete(key)
-        results = await pipe.execute()
-        released = sum(1 for r in results if r)
-        log.info(
-            "seats_force_released",
-            event_id=str(event_id),
-            released_count=released,
-        )
-        return released
-
     async def get_locked_seats(
         self,
         event_id: uuid.UUID,
@@ -235,14 +233,20 @@ class LockManager:
     ) -> bool:
         """Extend TTL on seat locks (e.g., during payment processing).
 
-        Returns True if all extends succeeded.
+        Returns True only if every lock is still held by *user_id*. If any
+        lock expired or was re-acquired by another user, nothing is extended.
         """
-        pipe = self.redis.pipeline()
-        for seat_id in seat_ids:
-            key = self._seat_lock_key(event_id, seat_id)
-            pipe.expire(key, new_ttl)
-        results = await pipe.execute()
-        success = all(results)
+        keys = [self._seat_lock_key(event_id, sid) for sid in seat_ids]
+        if not keys:
+            return False
+        result = await self.redis.eval(
+            EXTEND_SEATS_SCRIPT,
+            len(keys),
+            *keys,
+            str(user_id),
+            new_ttl,
+        )
+        success = int(result) == 1
         log.info(
             "lock_ttl_extended",
             event_id=str(event_id),

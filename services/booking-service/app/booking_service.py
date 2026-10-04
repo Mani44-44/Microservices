@@ -4,12 +4,18 @@ booking_service.py
 Core booking business logic.
 
 Concurrency safety strategy:
-  1. Seat locks are held in Redis via atomic Lua scripts (LockManager).
-  2. DB writes use PostgreSQL transactions; row-level locking (`SELECT FOR UPDATE`)
+  1. Seat locks are held in Redis via atomic Lua scripts (LockManager). Every
+     lock operation after the initial acquire (extend, release) checks that
+     the lock is still owned by the booking's user.
+  2. A sold seat is recorded in `seat_reservations`, whose UNIQUE(event_id,
+     seat_id) constraint is the database-level guarantee against selling the
+     same seat twice — Redis locks are released once a booking is confirmed.
+  3. DB writes use PostgreSQL transactions; row-level locking (`SELECT FOR UPDATE`)
      is applied when reading a booking for mutation to prevent double-processing.
-  3. The expiry handler force-releases locks AND updates DB status atomically
-     within a transaction, then emits an outbox event.
+  4. The expiry handler releases locks AND updates DB status within a
+     transaction it commits, then emits an outbox event.
 """
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -18,18 +24,22 @@ from typing import List, Optional, Tuple
 import httpx
 import structlog
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from libs.security import internal_headers
 from app.lock_manager import LockManager
-from app.models import Booking, BookingSeat, OutboxEvent, PaymentAttempt
+from app.models import Booking, BookingSeat, OutboxEvent, PaymentAttempt, SeatReservation
 from app.schemas import ConfirmBookingRequest, LockSeatsRequest
 
 log = structlog.get_logger()
 settings = get_settings()
+
+_PAYMENT_SUCCEEDED = {"SUCCEEDED", "SUCCESS", "COMPLETED", "APPROVED"}
+_PAYMENT_FAILED = {"FAILED", "DECLINED", "CANCELLED", "REFUNDED"}
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +49,13 @@ settings = get_settings()
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _error(status_code: int, code: str, message: str, details: dict | None = None) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"error": {"code": code, "message": message, "details": details or {}}},
+    )
 
 
 def _booking_payload(booking: Booking) -> dict:
@@ -59,42 +76,72 @@ async def _get_seat_price(
 ) -> Decimal:
     """Fetch a single seat's price from the catalog service.
 
-    Returns 0 if the catalog service is unavailable (graceful degradation
-    during tests/development; in production you'd raise).
+    Fails closed: a seat the catalog doesn't know is rejected (422), and an
+    unreachable/erroring catalog aborts the booking (503) rather than pricing
+    the seat at zero.
     """
+    url = f"{settings.catalog_service_url}/events/{event_id}/seats/{seat_id}"
     try:
-        url = f"{settings.catalog_service_url}/events/{event_id}/seats/{seat_id}"
         resp = await http_client.get(url, timeout=5.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            # catalog service returns {'price': '99.99', ...}
-            return Decimal(str(data.get("price", "0.00")))
-        log.warning(
-            "catalog_seat_not_found",
-            event_id=str(event_id),
-            seat_id=str(seat_id),
-            status_code=resp.status_code,
+    except httpx.HTTPError as exc:
+        log.warning("catalog_service_unavailable", error=str(exc), seat_id=str(seat_id))
+        raise _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "CATALOG_UNAVAILABLE",
+            "Seat pricing is temporarily unavailable; please try again",
         )
-        return Decimal("0.00")
-    except Exception as exc:
-        log.warning(
-            "catalog_service_unavailable",
-            error=str(exc),
-            seat_id=str(seat_id),
+
+    if resp.status_code == 200:
+        # catalog service returns {'price': '99.99', ...}
+        return Decimal(str(resp.json()["price"]))
+
+    log.warning(
+        "catalog_seat_lookup_failed",
+        event_id=str(event_id),
+        seat_id=str(seat_id),
+        status_code=resp.status_code,
+    )
+    if resp.status_code == 404:
+        raise _error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "SEAT_NOT_FOUND",
+            "One or more seats do not exist for this event",
+            {"seat_id": str(seat_id)},
         )
-        return Decimal("0.00")
+    raise _error(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "CATALOG_UNAVAILABLE",
+        "Seat pricing is temporarily unavailable; please try again",
+    )
 
 
 async def _fetch_seat_prices(
     event_id: uuid.UUID,
     seat_ids: List[uuid.UUID],
 ) -> dict[uuid.UUID, Decimal]:
-    """Batch-fetch seat prices from the catalog service."""
+    """Fetch seat prices from the catalog service concurrently."""
     async with httpx.AsyncClient(headers=internal_headers()) as client:
-        prices: dict[uuid.UUID, Decimal] = {}
-        for seat_id in seat_ids:
-            prices[seat_id] = await _get_seat_price(client, event_id, seat_id)
-    return prices
+        prices = await asyncio.gather(
+            *(_get_seat_price(client, event_id, seat_id) for seat_id in seat_ids)
+        )
+    return dict(zip(seat_ids, prices))
+
+
+async def _booked_seat_ids(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    seat_ids: Optional[List[uuid.UUID]] = None,
+) -> set[uuid.UUID]:
+    """Seats of *event_id* already sold to a confirmed booking."""
+    query = select(SeatReservation.seat_id).where(SeatReservation.event_id == event_id)
+    if seat_ids is not None:
+        query = query.where(SeatReservation.seat_id.in_(seat_ids))
+    result = await db.execute(query)
+    return set(result.scalars().all())
+
+
+async def get_booked_seat_ids(db: AsyncSession, event_id: uuid.UUID) -> List[str]:
+    return sorted(str(s) for s in await _booked_seat_ids(db, event_id))
 
 
 async def _fetch_booking_with_lock(
@@ -110,17 +157,17 @@ async def _fetch_booking_with_lock(
     )
     booking = result.scalar_one_or_none()
     if booking is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "code": "BOOKING_NOT_FOUND",
-                    "message": f"Booking {booking_id} not found",
-                    "details": {},
-                }
-            },
+        raise _error(
+            status.HTTP_404_NOT_FOUND,
+            "BOOKING_NOT_FOUND",
+            f"Booking {booking_id} not found",
         )
     return booking
+
+
+def _check_owner(booking: Booking, user_id: uuid.UUID) -> None:
+    if booking.user_id != user_id:
+        raise _error(status.HTTP_403_FORBIDDEN, "FORBIDDEN", "You do not own this booking")
 
 
 # ---------------------------------------------------------------------------
@@ -138,30 +185,21 @@ async def lock_seats(
 
     Steps:
       1. Deduplicate seat_ids.
-      2. Fetch prices from catalog service.
-      3. Atomically lock all seats in Redis (all-or-nothing).
-      4. Persist Booking + BookingSeat rows + OutboxEvent in one transaction.
+      2. Reject seats already sold to a confirmed booking.
+      3. Fetch prices from catalog service (fails closed).
+      4. Atomically lock all seats in Redis (all-or-nothing).
+      5. Persist Booking + BookingSeat rows + OutboxEvent in one transaction;
+         if that fails, release the Redis locks rather than leak them.
     """
     # Deduplicate while preserving order
-    seen: set[uuid.UUID] = set()
-    unique_seat_ids: List[uuid.UUID] = []
-    for sid in request.seat_ids:
-        if sid not in seen:
-            seen.add(sid)
-            unique_seat_ids.append(sid)
+    unique_seat_ids: List[uuid.UUID] = list(dict.fromkeys(request.seat_ids))
 
     if len(unique_seat_ids) > settings.max_seats_per_booking:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error": {
-                    "code": "TOO_MANY_SEATS",
-                    "message": (
-                        f"Cannot book more than {settings.max_seats_per_booking} seats at once"
-                    ),
-                    "details": {"max": settings.max_seats_per_booking},
-                }
-            },
+        raise _error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "TOO_MANY_SEATS",
+            f"Cannot book more than {settings.max_seats_per_booking} seats at once",
+            {"max": settings.max_seats_per_booking},
         )
 
     log.info(
@@ -171,7 +209,15 @@ async def lock_seats(
         seat_count=len(unique_seat_ids),
     )
 
-    # Fetch prices from catalog service
+    booked = await _booked_seat_ids(db, request.event_id, unique_seat_ids)
+    if booked:
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "SEAT_ALREADY_BOOKED",
+            "One or more seats have already been sold",
+            {"booked_seat_ids": sorted(str(s) for s in booked)},
+        )
+
     prices = await _fetch_seat_prices(request.event_id, unique_seat_ids)
 
     # Atomically lock all seats
@@ -185,30 +231,49 @@ async def lock_seats(
     if not success:
         # failed_idx is 1-based
         failed_seat_id = unique_seat_ids[failed_idx - 1] if failed_idx > 0 else None
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": {
-                    "code": "SEAT_ALREADY_LOCKED",
-                    "message": "One or more seats are already reserved by another user",
-                    "details": {
-                        "failed_seat_id": str(failed_seat_id) if failed_seat_id else None
-                    },
-                }
-            },
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "SEAT_ALREADY_LOCKED",
+            "One or more seats are already reserved by another user",
+            {"failed_seat_id": str(failed_seat_id) if failed_seat_id else None},
         )
 
-    # Persist booking inside a transaction
+    try:
+        booking = await _persist_pending_booking(
+            db, request.event_id, unique_seat_ids, user_id, prices
+        )
+    except Exception:
+        await lock_manager.release_seats(
+            event_id=request.event_id, seat_ids=unique_seat_ids, user_id=user_id
+        )
+        raise
+
+    log.info(
+        "booking_created",
+        booking_id=str(booking.id),
+        user_id=str(user_id),
+        event_id=str(request.event_id),
+        total_amount=str(booking.total_amount),
+    )
+    return booking
+
+
+async def _persist_pending_booking(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    seat_ids: List[uuid.UUID],
+    user_id: uuid.UUID,
+    prices: dict[uuid.UUID, Decimal],
+) -> Booking:
     now = _now()
     expires_at = now + timedelta(seconds=settings.seat_lock_ttl_seconds)
-    total_amount = sum(prices.values(), Decimal("0.00"))
 
     booking = Booking(
         id=uuid.uuid4(),
         user_id=user_id,
-        event_id=request.event_id,
+        event_id=event_id,
         status="PENDING",
-        total_amount=total_amount,
+        total_amount=sum(prices.values(), Decimal("0.00")),
         currency="USD",
         locked_at=now,
         expires_at=expires_at,
@@ -216,13 +281,13 @@ async def lock_seats(
     db.add(booking)
     await db.flush()  # get booking.id without committing
 
-    for seat_id in unique_seat_ids:
+    for seat_id in seat_ids:
         db.add(
             BookingSeat(
                 id=uuid.uuid4(),
                 booking_id=booking.id,
                 seat_id=seat_id,
-                price_at_booking=prices.get(seat_id, Decimal("0.00")),
+                price_at_booking=prices[seat_id],
             )
         )
 
@@ -232,7 +297,7 @@ async def lock_seats(
             event_type="SEATS_LOCKED",
             payload={
                 **_booking_payload(booking),
-                "seat_ids": [str(s) for s in unique_seat_ids],
+                "seat_ids": [str(s) for s in seat_ids],
                 "expires_at": expires_at.isoformat(),
             },
         )
@@ -240,20 +305,144 @@ async def lock_seats(
 
     await db.flush()
     await db.refresh(booking, ["seats"])
-
-    log.info(
-        "booking_created",
-        booking_id=str(booking.id),
-        user_id=str(user_id),
-        event_id=str(request.event_id),
-        total_amount=str(total_amount),
-    )
     return booking
 
 
 # ---------------------------------------------------------------------------
 # 2. Confirm booking
 # ---------------------------------------------------------------------------
+
+
+async def _read_payment_status(client: httpx.AsyncClient, payment_intent_id: str) -> Optional[str]:
+    """Ask payment-service for an intent's real status; None if still unknown."""
+    try:
+        resp = await client.get(f"{settings.payment_service_url}/payments/{payment_intent_id}")
+    except httpx.HTTPError as exc:
+        log.warning("payment_status_read_failed", payment_intent_id=payment_intent_id, error=str(exc))
+        return None
+    if resp.status_code != 200:
+        return None
+    payment_status = str(resp.json().get("status", "")).upper()
+    return payment_status if payment_status in _PAYMENT_SUCCEEDED | _PAYMENT_FAILED else None
+
+
+async def _charge(
+    booking: Booking, request: ConfirmBookingRequest
+) -> Tuple[Optional[str], Optional[str]]:
+    """Charge for *booking* via payment-service.
+
+    Returns (payment_status, payment_intent_id) where payment_status is
+    "SUCCEEDED", "FAILED", or None when the outcome is unknown (the confirm
+    call errored and payment-service couldn't tell us what happened).
+
+    The booking id is the payment idempotency key, so create-intent returns
+    the existing intent on a retry — if a previous attempt already charged
+    the card, its SUCCEEDED status is reused instead of charging again.
+
+    Raises 502 if no intent could be created (no charge can have happened).
+    """
+    async with httpx.AsyncClient(timeout=30.0, headers=internal_headers()) as client:
+        try:
+            create_resp = await client.post(
+                f"{settings.payment_service_url}/payments/create-intent",
+                json={
+                    "booking_id": str(booking.id),
+                    "amount": str(booking.total_amount),
+                    "currency": booking.currency,
+                    "idempotency_key": str(booking.id),
+                    "user_id": str(booking.user_id),
+                },
+            )
+        except httpx.HTTPError as exc:
+            log.error("payment_create_intent_error", booking_id=str(booking.id), error=str(exc))
+            create_resp = None
+
+        if create_resp is None or create_resp.status_code not in (200, 201):
+            log.error(
+                "payment_create_intent_failed",
+                booking_id=str(booking.id),
+                status_code=getattr(create_resp, "status_code", None),
+            )
+            raise _error(
+                status.HTTP_502_BAD_GATEWAY,
+                "PAYMENT_SERVICE_ERROR",
+                "Failed to create payment intent",
+            )
+
+        intent_data = create_resp.json()
+        payment_intent_id = intent_data.get("id") or intent_data.get("payment_intent_id")
+        intent_status = str(intent_data.get("status") or "PENDING").upper()
+        if intent_status in _PAYMENT_SUCCEEDED:
+            return "SUCCEEDED", payment_intent_id
+        if intent_status in _PAYMENT_FAILED:
+            return "FAILED", payment_intent_id
+
+        try:
+            confirm_resp = await client.post(
+                f"{settings.payment_service_url}/payments/{payment_intent_id}/confirm",
+                json={"payment_method_details": request.payment_method},
+            )
+        except httpx.HTTPError as exc:
+            log.error(
+                "payment_confirm_error",
+                booking_id=str(booking.id),
+                payment_intent_id=payment_intent_id,
+                error=str(exc),
+            )
+            confirm_resp = None
+
+        if confirm_resp is not None and confirm_resp.status_code in (200, 201):
+            confirmed = str(confirm_resp.json().get("status", "SUCCEEDED")).upper()
+            return ("SUCCEEDED" if confirmed in _PAYMENT_SUCCEEDED else "FAILED"), payment_intent_id
+
+        if confirm_resp is not None and 400 <= confirm_resp.status_code < 500 and confirm_resp.status_code != 409:
+            # A definite rejection: the charge was never attempted.
+            log.error(
+                "payment_confirm_rejected",
+                booking_id=str(booking.id),
+                payment_intent_id=payment_intent_id,
+                status_code=confirm_resp.status_code,
+            )
+            return "FAILED", payment_intent_id
+
+        # Transport error, 5xx, or 409 (intent no longer PENDING): the charge
+        # may or may not have happened, so ask instead of assuming.
+        payment_status = await _read_payment_status(client, payment_intent_id)
+        if payment_status is None:
+            return None, payment_intent_id
+        return ("SUCCEEDED" if payment_status in _PAYMENT_SUCCEEDED else "FAILED"), payment_intent_id
+
+
+async def _record_payment_attempt(
+    db: AsyncSession,
+    booking: Booking,
+    payment_intent_id: Optional[str],
+    payment_status: str,
+) -> None:
+    """Upsert the booking's payment attempt (one per idempotency key)."""
+    idempotency_key = str(booking.id)
+    result = await db.execute(
+        select(PaymentAttempt).where(PaymentAttempt.idempotency_key == idempotency_key)
+    )
+    attempt = result.scalar_one_or_none()
+    if attempt is None:
+        db.add(
+            PaymentAttempt(
+                id=uuid.uuid4(),
+                booking_id=booking.id,
+                payment_intent_id=payment_intent_id,
+                amount=booking.total_amount,
+                status=payment_status,
+                idempotency_key=idempotency_key,
+            )
+        )
+    else:
+        attempt.payment_intent_id = payment_intent_id or attempt.payment_intent_id
+        attempt.status = payment_status
+
+
+async def _release_reservations(db: AsyncSession, booking_id: uuid.UUID) -> None:
+    await db.execute(delete(SeatReservation).where(SeatReservation.booking_id == booking_id))
 
 
 async def confirm_booking(
@@ -269,25 +458,15 @@ async def confirm_booking(
       1. Load booking with row-lock.
       2. Ownership + status checks.
       3. Idempotency – if already CONFIRMED, return immediately.
-      4. Extend seat lock TTL for payment processing time.
-      5. Call payment service to create and confirm a payment intent.
-      6. Update booking status and release Redis locks.
-      7. Emit outbox event.
+      4. Extend seat lock TTL for payment processing time (owner-checked).
+      5. Reserve the seats in the DB *before* charging, so a seat that was
+         somehow sold already fails here without charging anyone.
+      6. Call payment service to create and confirm a payment intent.
+      7. Update booking status and release Redis locks.
+      8. Emit outbox event.
     """
     booking = await _fetch_booking_with_lock(booking_id, db)
-
-    # Ownership check
-    if booking.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": {
-                    "code": "FORBIDDEN",
-                    "message": "You do not own this booking",
-                    "details": {},
-                }
-            },
-        )
+    _check_owner(booking, user_id)
 
     # Idempotency: already confirmed
     if booking.status == "CONFIRMED":
@@ -296,15 +475,11 @@ async def confirm_booking(
 
     # Must be PENDING
     if booking.status != "PENDING":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": {
-                    "code": "INVALID_BOOKING_STATUS",
-                    "message": f"Cannot confirm a booking with status '{booking.status}'",
-                    "details": {"current_status": booking.status},
-                }
-            },
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_BOOKING_STATUS",
+            f"Cannot confirm a booking with status '{booking.status}'",
+            {"current_status": booking.status},
         )
 
     # Expiry check
@@ -314,22 +489,18 @@ async def confirm_booking(
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at <= _now():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": {
-                    "code": "BOOKING_EXPIRED",
-                    "message": "Seat lock has expired; please start a new booking",
-                    "details": {"expired_at": booking.expires_at.isoformat()},
-                }
-            },
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "BOOKING_EXPIRED",
+            "Seat lock has expired; please start a new booking",
+            {"expired_at": booking.expires_at.isoformat()},
         )
 
     seat_ids = [s.seat_id for s in booking.seats]
 
     # Extend TTL so locks survive payment processing. A failed extend means
-    # at least one seat lock already expired (EXPIRE on a missing key
-    # returns 0) — nothing to retry, so abort before contacting payment.
+    # at least one seat lock expired or now belongs to another user —
+    # nothing to retry, so abort before contacting payment.
     renewed = await lock_manager.extend_lock_ttl(
         event_id=booking.event_id,
         seat_ids=seat_ids,
@@ -354,112 +525,84 @@ async def confirm_booking(
                 },
             )
         )
-        await db.flush()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": {
-                    "code": "BOOKING_EXPIRED",
-                    "message": "Seat lock has expired; please start a new booking",
-                    "details": {},
-                }
-            },
+        # get_db only commits on the success path; this route raises next,
+        # so commit explicitly or the EXPIRED transition is rolled back.
+        await db.commit()
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "BOOKING_EXPIRED",
+            "Seat lock has expired; please start a new booking",
         )
-
-    # ----- Payment service calls -----
-    idempotency_key = str(booking.id)
-    payment_intent_id: Optional[str] = None
-    payment_status = "FAILED"
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, headers=internal_headers()) as client:
-            # Step 1: Create payment intent
-            create_resp = await client.post(
-                f"{settings.payment_service_url}/payments/create-intent",
-                json={
-                    "booking_id": str(booking.id),
-                    "amount": str(booking.total_amount),
-                    "currency": booking.currency,
-                    "idempotency_key": idempotency_key,
-                },
+        async with db.begin_nested():
+            for seat_id in seat_ids:
+                db.add(
+                    SeatReservation(
+                        event_id=booking.event_id, seat_id=seat_id, booking_id=booking.id
+                    )
+                )
+    except IntegrityError:
+        log.error("seat_already_reserved", booking_id=str(booking.id))
+        await lock_manager.release_seats(
+            event_id=booking.event_id, seat_ids=seat_ids, user_id=user_id
+        )
+        booking.status = "FAILED"
+        booking.updated_at = _now()
+        db.add(
+            OutboxEvent(
+                id=uuid.uuid4(),
+                event_type="BOOKING_FAILED",
+                payload={**_booking_payload(booking), "reason": "SEAT_ALREADY_BOOKED"},
             )
+        )
+        await db.commit()
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "SEAT_ALREADY_BOOKED",
+            "One or more seats have already been sold",
+        )
 
-            if create_resp.status_code not in (200, 201):
-                log.error(
-                    "payment_create_intent_failed",
-                    booking_id=str(booking_id),
-                    status_code=create_resp.status_code,
-                    body=create_resp.text,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={
-                        "error": {
-                            "code": "PAYMENT_SERVICE_ERROR",
-                            "message": "Failed to create payment intent",
-                            "details": {},
-                        }
-                    },
-                )
-
-            intent_data = create_resp.json()
-            payment_intent_id = intent_data.get("id") or intent_data.get("payment_intent_id")
-
-            # Step 2: Confirm payment intent
-            confirm_resp = await client.post(
-                f"{settings.payment_service_url}/payments/{payment_intent_id}/confirm",
-                json={"payment_method_details": request.payment_method},
-            )
-
-            if confirm_resp.status_code in (200, 201):
-                confirm_data = confirm_resp.json()
-                payment_status = confirm_data.get("status", "SUCCEEDED").upper()
-            else:
-                log.error(
-                    "payment_confirm_failed",
-                    booking_id=str(booking_id),
-                    payment_intent_id=payment_intent_id,
-                    status_code=confirm_resp.status_code,
-                )
-                payment_status = "FAILED"
-
-    except HTTPException:
+    try:
+        payment_status, payment_intent_id = await _charge(booking, request)
+    except Exception:
+        await _release_reservations(db, booking.id)
         raise
-    except Exception as exc:
-        log.error(
-            "payment_service_exception",
-            booking_id=str(booking_id),
-            error=str(exc),
-        )
-        payment_status = "FAILED"
 
-    # Record payment attempt
-    db.add(
-        PaymentAttempt(
-            id=uuid.uuid4(),
-            booking_id=booking.id,
+    if payment_status is None:
+        # Outcome unknown: keep the booking PENDING and the seats held so a
+        # retry (same idempotency key) can pick up the real result.
+        await _release_reservations(db, booking.id)
+        await _record_payment_attempt(db, booking, payment_intent_id, "UNKNOWN")
+        await db.commit()
+        log.error(
+            "payment_status_unknown",
+            booking_id=str(booking.id),
             payment_intent_id=payment_intent_id,
-            amount=booking.total_amount,
-            status=payment_status,
-            idempotency_key=idempotency_key,
         )
-    )
+        raise _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "PAYMENT_STATUS_UNKNOWN",
+            "We could not confirm your payment status; please retry shortly",
+            {"retryable": True},
+        )
+
+    await _record_payment_attempt(db, booking, payment_intent_id, payment_status)
 
     now = _now()
 
-    if payment_status in ("SUCCEEDED", "SUCCESS", "COMPLETED", "APPROVED"):
-        # SUCCESS path
+    # Seats are now either committed in the DB or being given up; either
+    # way the Redis hold is no longer needed.
+    await lock_manager.release_seats(
+        event_id=booking.event_id,
+        seat_ids=seat_ids,
+        user_id=user_id,
+    )
+
+    if payment_status == "SUCCEEDED":
         booking.status = "CONFIRMED"
         booking.confirmed_at = now
         booking.updated_at = now
-
-        # Release Redis locks – seats are now committed in DB
-        await lock_manager.release_seats(
-            event_id=booking.event_id,
-            seat_ids=seat_ids,
-            user_id=user_id,
-        )
-
         db.add(
             OutboxEvent(
                 id=uuid.uuid4(),
@@ -467,7 +610,6 @@ async def confirm_booking(
                 payload=_booking_payload(booking),
             )
         )
-
         log.info(
             "booking_confirmed",
             booking_id=str(booking.id),
@@ -475,17 +617,9 @@ async def confirm_booking(
             payment_intent_id=payment_intent_id,
         )
     else:
-        # FAILURE path
+        await _release_reservations(db, booking.id)
         booking.status = "FAILED"
         booking.updated_at = now
-
-        # Release locks so other users can book
-        await lock_manager.release_seats(
-            event_id=booking.event_id,
-            seat_ids=seat_ids,
-            user_id=user_id,
-        )
-
         db.add(
             OutboxEvent(
                 id=uuid.uuid4(),
@@ -493,7 +627,6 @@ async def confirm_booking(
                 payload={**_booking_payload(booking), "payment_status": payment_status},
             )
         )
-
         log.warning(
             "booking_payment_failed",
             booking_id=str(booking.id),
@@ -519,29 +652,14 @@ async def release_booking(
 ) -> Booking:
     """Cancel a PENDING booking and release Redis seat locks."""
     booking = await _fetch_booking_with_lock(booking_id, db)
-
-    if booking.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": {
-                    "code": "FORBIDDEN",
-                    "message": "You do not own this booking",
-                    "details": {},
-                }
-            },
-        )
+    _check_owner(booking, user_id)
 
     if booking.status != "PENDING":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": {
-                    "code": "INVALID_BOOKING_STATUS",
-                    "message": f"Cannot release a booking with status '{booking.status}'",
-                    "details": {"current_status": booking.status},
-                }
-            },
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_BOOKING_STATUS",
+            f"Cannot release a booking with status '{booking.status}'",
+            {"current_status": booking.status},
         )
 
     seat_ids = [s.seat_id for s in booking.seats]
@@ -573,7 +691,59 @@ async def release_booking(
 
 
 # ---------------------------------------------------------------------------
-# 4. Get single booking
+# 4. Cancel a confirmed booking (refund path)
+# ---------------------------------------------------------------------------
+
+
+async def cancel_confirmed_booking(
+    booking_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession,
+) -> Booking:
+    """Cancel a CONFIRMED booking and put its seats back on sale.
+
+    Called by the support agent before it issues a refund, so a refunded
+    customer never keeps a valid ticket. Idempotent: an already-cancelled
+    booking is returned unchanged.
+    """
+    booking = await _fetch_booking_with_lock(booking_id, db)
+    _check_owner(booking, user_id)
+
+    if booking.status == "CANCELLED":
+        log.info("cancel_booking_idempotent", booking_id=str(booking_id))
+        return booking
+
+    if booking.status != "CONFIRMED":
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_BOOKING_STATUS",
+            f"Only confirmed bookings can be cancelled; current status '{booking.status}'",
+            {"current_status": booking.status},
+        )
+
+    await _release_reservations(db, booking.id)
+
+    now = _now()
+    booking.status = "CANCELLED"
+    booking.cancelled_at = now
+    booking.updated_at = now
+    db.add(
+        OutboxEvent(
+            id=uuid.uuid4(),
+            event_type="BOOKING_CANCELLED",
+            payload={**_booking_payload(booking), "was_confirmed": True},
+        )
+    )
+
+    await db.flush()
+    await db.refresh(booking, ["seats"])
+
+    log.info("confirmed_booking_cancelled", booking_id=str(booking_id), user_id=str(user_id))
+    return booking
+
+
+# ---------------------------------------------------------------------------
+# 5. Get single booking
 # ---------------------------------------------------------------------------
 
 
@@ -591,34 +761,18 @@ async def get_booking(
     booking = result.scalar_one_or_none()
 
     if booking is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "code": "BOOKING_NOT_FOUND",
-                    "message": f"Booking {booking_id} not found",
-                    "details": {},
-                }
-            },
+        raise _error(
+            status.HTTP_404_NOT_FOUND,
+            "BOOKING_NOT_FOUND",
+            f"Booking {booking_id} not found",
         )
 
-    if booking.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": {
-                    "code": "FORBIDDEN",
-                    "message": "You do not own this booking",
-                    "details": {},
-                }
-            },
-        )
-
+    _check_owner(booking, user_id)
     return booking
 
 
 # ---------------------------------------------------------------------------
-# 5. Get paginated user bookings
+# 6. Get paginated user bookings
 # ---------------------------------------------------------------------------
 
 
@@ -652,7 +806,7 @@ async def get_user_bookings(
 
 
 # ---------------------------------------------------------------------------
-# 6. Expiry handler (background task)
+# 7. Expiry handler (background task)
 # ---------------------------------------------------------------------------
 
 
@@ -662,7 +816,7 @@ async def expire_pending_bookings(
 ) -> int:
     """Find PENDING bookings past their expiry time and mark them EXPIRED.
 
-    This is called by the background expiry handler task every 30 seconds.
+    Does not commit; see run_expiry_once().
 
     Returns:
         Number of bookings expired in this run.
@@ -672,7 +826,7 @@ async def expire_pending_bookings(
     # Load expired PENDING bookings (with seat data for lock release)
     result = await db.execute(
         select(Booking)
-        .options(selectinload(Booking.seats))
+        .options(selectinload(Booking.seats), selectinload(Booking.payment_attempts))
         .where(Booking.status == "PENDING")
         .where(Booking.expires_at <= now)
         .with_for_update(skip_locked=True)  # avoid contention with confirm path
@@ -687,27 +841,25 @@ async def expire_pending_bookings(
         try:
             seat_ids = [s.seat_id for s in booking.seats]
 
-            # Force-release Redis locks (user may have disconnected, so we
-            # cannot check ownership here)
+            # Only release locks still held by this booking's user: once a
+            # lock's TTL lapses another user may legitimately hold the seat.
             if seat_ids:
-                await lock_manager.release_seats_admin(
+                await lock_manager.release_seats(
                     event_id=booking.event_id,
                     seat_ids=seat_ids,
+                    user_id=booking.user_id,
                 )
 
             booking.status = "EXPIRED"
             booking.updated_at = now
 
-            db.add(
-                OutboxEvent(
-                    id=uuid.uuid4(),
-                    event_type="BOOKING_EXPIRED",
-                    payload={
-                        **_booking_payload(booking),
-                        "expired_at": now.isoformat(),
-                    },
-                )
-            )
+            payload = {**_booking_payload(booking), "expired_at": now.isoformat()}
+            if any(a.status == "UNKNOWN" for a in booking.payment_attempts):
+                # A charge may have gone through; flag it for reconciliation.
+                payload["payment_status_unknown"] = True
+                log.error("expired_booking_payment_unknown", booking_id=str(booking.id))
+
+            db.add(OutboxEvent(id=uuid.uuid4(), event_type="BOOKING_EXPIRED", payload=payload))
             expired_count += 1
 
         except Exception as exc:
@@ -721,3 +873,11 @@ async def expire_pending_bookings(
 
     log.info("bookings_expired", count=expired_count, checked_at=now.isoformat())
     return expired_count
+
+
+async def run_expiry_once(session_factory, lock_manager: LockManager) -> int:
+    """One expiry pass in its own transaction, committed on success."""
+    async with session_factory() as db:
+        expired = await expire_pending_bookings(db, lock_manager)
+        await db.commit()
+    return expired

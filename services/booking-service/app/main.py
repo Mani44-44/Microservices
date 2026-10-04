@@ -40,9 +40,8 @@ async def _expiry_loop(app: FastAPI) -> None:
     while True:
         await asyncio.sleep(settings.expiry_check_interval_seconds)
         try:
-            async with async_session_factory() as db:
-                lock_manager = get_lock_manager(app.state.redis)
-                await svc.expire_pending_bookings(db, lock_manager)
+            lock_manager = get_lock_manager(app.state.redis)
+            await svc.run_expiry_once(async_session_factory, lock_manager)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

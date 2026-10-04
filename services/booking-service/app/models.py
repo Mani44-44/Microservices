@@ -191,6 +191,49 @@ class PaymentAttempt(Base):
         return f"<PaymentAttempt id={self.id} status={self.status}>"
 
 
+class SeatReservation(Base):
+    """A sold seat. One row per (event, seat) for every CONFIRMED booking.
+
+    Redis seat locks only cover the short hold before payment and are
+    released once a booking is confirmed; the UNIQUE(event_id, seat_id)
+    constraint here is what guarantees a seat is never sold twice.
+    """
+
+    __tablename__ = "seat_reservations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+    )
+    seat_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+    )
+    booking_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("bookings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "seat_id", name="uq_seat_reservation"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SeatReservation event={self.event_id} seat={self.seat_id}>"
+
+
 class OutboxEvent(Base):
     """Transactional outbox for reliable event publishing."""
 
