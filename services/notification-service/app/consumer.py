@@ -59,9 +59,35 @@ async def handle_envelope(db, envelope: dict) -> None:
     await db.commit()
 
 
+def _parse_envelope(value: bytes) -> dict | None:
+    """Decode and minimally validate an event envelope; None if malformed."""
+    try:
+        envelope = json.loads(value)
+        uuid.UUID(envelope["event_id"])
+        if not isinstance(envelope["event_type"], str) or not isinstance(envelope["payload"], dict):
+            return None
+        return envelope
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+async def _send_to_dlq(producer, value: bytes, key: bytes | None) -> None:
+    await producer.send_and_wait(DLQ_TOPIC, value=value, key=key)
+    DLQ_MESSAGES.labels(service=settings.service_name, topic=DLQ_TOPIC).inc()
+
+
 async def process_message(producer, value: bytes, key: bytes | None) -> None:
-    """Retry the handler up to kafka_max_retries times, then route to the DLQ topic."""
-    envelope = json.loads(value)
+    """Retry the handler up to kafka_max_retries times, then route to the DLQ topic.
+
+    A malformed message goes straight to the DLQ: retrying can't fix it, and
+    letting the decode error escape would crash the consume loop and get the
+    same message redelivered forever (a poison pill blocking the partition).
+    """
+    envelope = _parse_envelope(value)
+    if envelope is None:
+        await _send_to_dlq(producer, value, key)
+        log.error("notification_malformed_event_dlq", key=key.decode(errors="replace") if key else None)
+        return
     attempt = 0
     while True:
         attempt += 1
@@ -77,8 +103,7 @@ async def process_message(producer, value: bytes, key: bytes | None) -> None:
                 event_id=envelope.get("event_id"),
             )
             if attempt >= settings.kafka_max_retries:
-                await producer.send_and_wait(DLQ_TOPIC, value=value, key=key)
-                DLQ_MESSAGES.labels(service=settings.service_name, topic=DLQ_TOPIC).inc()
+                await _send_to_dlq(producer, value, key)
                 log.error("notification_event_dlq", event_id=envelope.get("event_id"))
                 return
             await asyncio.sleep(0.5 * attempt)

@@ -107,3 +107,13 @@ async def test_replay_dlq_respects_max_messages():
 async def test_dlq_topic_constant_is_the_replay_target():
     assert DLQ_TOPIC == "booking.events.dlq"
     assert TOPIC == "booking.events"
+
+
+async def test_process_message_routes_malformed_payload_to_dlq():
+    """A poison message (not JSON / missing fields) must go to the DLQ, not
+    raise out of the consume loop and be redelivered forever."""
+    producer = AsyncMock()
+    for value in (b"not json at all", b'{"event_type": "BOOKING_CONFIRMED"}'):
+        producer.reset_mock()
+        await process_message(producer, value, b"k")
+        producer.send_and_wait.assert_awaited_once_with(DLQ_TOPIC, value=value, key=b"k")

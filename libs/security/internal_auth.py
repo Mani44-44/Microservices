@@ -7,6 +7,7 @@ on inbound requests; every service that calls a non-edge service attaches
 it on outbound requests via the same shared secret.
 """
 
+import hmac
 import os
 
 from fastapi import FastAPI, Request
@@ -41,7 +42,9 @@ def require_internal_secret(app: FastAPI) -> None:
     async def _internal_auth_middleware(request: Request, call_next):
         if request.url.path in _EXEMPT_PATHS:
             return await call_next(request)
-        if request.headers.get(INTERNAL_SECRET_HEADER) != secret:
+        provided = request.headers.get(INTERNAL_SECRET_HEADER, "")
+        # Constant-time compare; bytes so non-ASCII header values can't raise.
+        if not hmac.compare_digest(provided.encode(), secret.encode()):
             return JSONResponse(
                 status_code=403,
                 content={
