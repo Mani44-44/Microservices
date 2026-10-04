@@ -105,6 +105,7 @@ async def test_handle_refund_request_no_booking_id_asks_for_it(client):
     assert "booking" in body["response_text"].lower()
 
 
+@patch("app.tools.clients.cancel_booking_for_refund", new=AsyncMock(return_value={}))
 @patch("app.tools.clients.refund_payment", new_callable=AsyncMock)
 @patch("app.tools.clients.get_payment_by_booking", new_callable=AsyncMock)
 @patch("app.tools.clients.get_event", new_callable=AsyncMock)
@@ -143,6 +144,7 @@ async def test_handle_refund_request_uses_llm_generated_message(
     mock_refund.assert_awaited_once_with("p1", 100.0, "Full refund window")
 
 
+@patch("app.tools.clients.cancel_booking_for_refund", new=AsyncMock(return_value={}))
 @patch("app.tools.clients.refund_payment", new_callable=AsyncMock)
 @patch("app.tools.clients.get_payment_by_booking", new_callable=AsyncMock)
 @patch("app.tools.clients.get_event", new_callable=AsyncMock)

@@ -65,6 +65,7 @@ async def test_request_refund_uses_rules_engine_amount_not_user_amount(
     mock_refund.assert_not_called()
 
 
+@patch("app.tools.clients.cancel_booking_for_refund", new=AsyncMock(return_value={}))
 @patch("app.tools.clients.refund_payment", new_callable=AsyncMock)
 @patch("app.tools.clients.get_payment_by_booking", new_callable=AsyncMock)
 @patch("app.tools.clients.get_event", new_callable=AsyncMock)
@@ -138,3 +139,84 @@ async def test_generate_refund_message_falls_back_to_template_on_llm_error():
 async def test_generate_refund_message_no_client_uses_template():
     text = await tools.generate_refund_message(None, ELIGIBILITY, APPROVED_RESULT)
     assert text == "Your refund of 100.0 has been processed (Full refund window)."
+
+
+# ---------------------------------------------------------------------------
+# A refund must invalidate the ticket: cancel the booking first, then refund.
+# ---------------------------------------------------------------------------
+
+SUCCEEDED_PAYMENT = {"payment_id": "p1", "booking_id": "b1", "amount": 100.0, "currency": "USD", "status": "SUCCEEDED"}
+
+
+def _refund_mocks(event_date=FUTURE_EVENT_DATE, payment=SUCCEEDED_PAYMENT):
+    """Patch every client call request_refund makes; returns (patchers, parent mock)."""
+    from unittest.mock import MagicMock
+
+    parent = MagicMock()
+    mocks = {
+        "get_booking": AsyncMock(return_value=BOOKING),
+        "get_event": AsyncMock(return_value={"event_date": event_date, "status": "PUBLISHED"}),
+        "get_payment_by_booking": AsyncMock(return_value=payment),
+        "cancel_booking_for_refund": AsyncMock(return_value={**BOOKING, "status": "CANCELLED"}),
+        "refund_payment": AsyncMock(return_value={"id": "r1", "status": "SUCCEEDED"}),
+    }
+    for name, mock in mocks.items():
+        parent.attach_mock(mock, name)
+    patchers = [patch(f"app.tools.clients.{name}", mock, create=True) for name, mock in mocks.items()]
+    return patchers, parent
+
+
+async def _request_refund(db_session, patchers):
+    for p in patchers:
+        p.start()
+    try:
+        return await tools.request_refund(
+            db_session, booking_id="b1", amount=100.0, user_id="u1", user_bearer_token="token"
+        )
+    finally:
+        for p in patchers:
+            p.stop()
+
+
+async def test_request_refund_cancels_booking_before_refunding(db_session):
+    patchers, parent = _refund_mocks()
+
+    result = await _request_refund(db_session, patchers)
+
+    assert result["success"] is True
+    calls = [c[0] for c in parent.mock_calls]
+    assert calls.index("cancel_booking_for_refund") < calls.index("refund_payment")
+    parent.cancel_booking_for_refund.assert_awaited_once_with("b1", "token")
+
+
+async def test_request_refund_does_not_refund_when_cancel_fails(db_session):
+    patchers, parent = _refund_mocks()
+    request = httpx.Request("POST", "http://booking/bookings/b1/cancel")
+    parent.cancel_booking_for_refund.side_effect = httpx.HTTPStatusError(
+        "conflict", request=request, response=httpx.Response(409, request=request)
+    )
+
+    with pytest.raises(tools.DownstreamError):
+        await _request_refund(db_session, patchers)
+
+    parent.refund_payment.assert_not_awaited()
+
+
+async def test_request_refund_zero_eligible_keeps_booking(db_session):
+    patchers, parent = _refund_mocks(event_date=NEAR_EVENT_DATE)
+
+    result = await _request_refund(db_session, patchers)
+
+    assert result["status"] == "DENIED"
+    parent.cancel_booking_for_refund.assert_not_awaited()
+    parent.refund_payment.assert_not_awaited()
+
+
+async def test_request_refund_unrefundable_payment_keeps_booking(db_session):
+    patchers, parent = _refund_mocks(payment={**SUCCEEDED_PAYMENT, "status": "REFUNDED"})
+
+    result = await _request_refund(db_session, patchers)
+
+    assert result["status"] == "DENIED"
+    parent.cancel_booking_for_refund.assert_not_awaited()
+    parent.refund_payment.assert_not_awaited()

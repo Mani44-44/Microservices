@@ -37,6 +37,17 @@ async def release_booking(booking_id: str, user_bearer_token: str) -> dict:
         return resp.json()
 
 
+async def cancel_booking_for_refund(booking_id: str, user_bearer_token: str) -> dict:
+    """Cancel a CONFIRMED booking (frees its seats). Idempotent on booking-service."""
+    async with httpx.AsyncClient(timeout=settings.http_timeout_seconds, headers=internal_headers()) as client:
+        resp = await client.post(
+            f"{settings.booking_service_url}/bookings/{booking_id}/cancel",
+            headers=_auth_headers(user_bearer_token),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def get_event(event_id: str) -> dict:
     async with httpx.AsyncClient(timeout=settings.http_timeout_seconds, headers=internal_headers()) as client:
         resp = await client.get(f"{settings.catalog_service_url}/events/{event_id}")

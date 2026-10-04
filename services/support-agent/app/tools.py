@@ -93,6 +93,12 @@ async def request_refund(
     Always trusts the rules-engine-computed eligible amount, never the
     caller-supplied `amount` at face value. If they differ, the response
     explains the discrepancy rather than silently overriding it.
+
+    A refund invalidates the ticket: the booking is cancelled (seats return
+    to sale) *before* money is refunded, so a failure can never leave the
+    customer with both a refund and a valid booking. If the refund itself
+    then fails, DownstreamError escalates to a human with the booking
+    already cancelled.
     """
     try:
         eligibility = await check_refund_eligibility(booking_id, user_bearer_token)
@@ -130,33 +136,26 @@ async def request_refund(
             "refund_request_id": str(refund_request.id),
         }
 
+    if payment.get("status") != "SUCCEEDED":
+        return await _deny_unrefundable(db, booking_id, user_id, eligible_amount, reason, discrepancy_note)
+
+    try:
+        await clients.cancel_booking_for_refund(booking_id, user_bearer_token)
+    except httpx.HTTPError as exc:
+        log.warning("refund_booking_cancel_failed", booking_id=booking_id, error=str(exc))
+        raise DownstreamError(f"Could not cancel booking {booking_id} for refund") from exc
+
     try:
         refund_result = await clients.refund_payment(
             payment["payment_id"], eligible_amount, reason or eligibility["reason"]
         )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 409:
-            refund_request = RefundRequest(
-                booking_id=booking_id,
-                user_id=user_id,
-                amount=eligible_amount,
-                reason=reason,
-                status="DENIED",
-            )
-            db.add(refund_request)
-            await db.flush()
-            return {
-                "success": False,
-                "status": "DENIED",
-                "reason": "Payment is not in a refundable state (not SUCCEEDED).",
-                "discrepancy_note": discrepancy_note,
-                "refund_request_id": str(refund_request.id),
-            }
-        log.warning("request_refund_call_failed", booking_id=booking_id, error=str(exc))
-        raise DownstreamError(f"Refund call failed for booking {booking_id}") from exc
     except httpx.HTTPError as exc:
-        log.warning("request_refund_call_failed", booking_id=booking_id, error=str(exc))
-        raise DownstreamError(f"Refund call failed for booking {booking_id}") from exc
+        # The booking is already cancelled at this point; a human must
+        # complete (or reconcile) the refund.
+        log.error("request_refund_call_failed_after_cancel", booking_id=booking_id, error=str(exc))
+        raise DownstreamError(
+            f"Booking {booking_id} was cancelled but the refund call failed"
+        ) from exc
 
     refund_request = RefundRequest(
         booking_id=booking_id,
@@ -177,6 +176,32 @@ async def request_refund(
         "discrepancy_note": discrepancy_note,
         "refund_request_id": str(refund_request.id),
         "provider_refund": refund_result,
+    }
+
+
+async def _deny_unrefundable(
+    db: AsyncSession,
+    booking_id: str,
+    user_id: str,
+    amount: float,
+    reason: str,
+    discrepancy_note: str | None,
+) -> dict:
+    refund_request = RefundRequest(
+        booking_id=booking_id,
+        user_id=user_id,
+        amount=amount,
+        reason=reason,
+        status="DENIED",
+    )
+    db.add(refund_request)
+    await db.flush()
+    return {
+        "success": False,
+        "status": "DENIED",
+        "reason": "Payment is not in a refundable state (not SUCCEEDED).",
+        "discrepancy_note": discrepancy_note,
+        "refund_request_id": str(refund_request.id),
     }
 
 
