@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TicketFlow</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; background: #f7f7f9; }
+  h1 { margin-bottom: 4px; }
+  .sub { color: #666; margin-top: 0; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  h2 { margin-top: 0; font-size: 16px; }
+  label { display: block; font-size: 13px; color: #444; margin: 8px 0 2px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+  button { margin-top: 10px; padding: 7px 14px; border: none; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; font-size: 14px; }
+  button:hover { background: #1d4ed8; }
+  button.secondary { background: #6b7280; }
+  button.danger { background: #dc2626; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  pre { background: #111; color: #7ee787; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 220px; }
+  .event { border: 1px solid #eee; border-radius: 6px; padding: 8px; margin-bottom: 6px; cursor: pointer; }
+  .event:hover { background: #f0f4ff; }
+  .seat { display: inline-block; padding: 4px 8px; margin: 2px; border-radius: 4px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; }
+  .seat.available { background: #ecfdf5; border-color: #10b981; }
+  .seat.selected { background: #10b981; color: #fff; }
+  .seat.locked, .seat.booked { background: #f3f4f6; color: #999; cursor: not-allowed; }
+  .status { font-size: 13px; padding: 2px 8px; border-radius: 10px; display: inline-block; }
+  .status.ok { background: #d1fae5; color: #065f46; }
+  .status.err { background: #fee2e2; color: #991b1b; }
+  .chat-log { max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
+  .msg { margin: 6px 0; padding: 6px 10px; border-radius: 6px; max-width: 80%; }
+  .msg.user { background: #2563eb; color: #fff; margin-left: auto; }
+  .msg.bot { background: #f3f4f6; }
+  .msg.blocked { background: #fee2e2; color: #991b1b; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>TicketFlow</h1>
+<p class="sub">Live UI against the real local stack — gateway :8000, agent-gateway :8007.</p>
+
+<section id="auth-section">
+  <h2>1. Account</h2>
+  <div id="auth-status"></div>
+  <div class="row">
+    <div>
+      <label>Email</label>
+      <input id="email" value="">
+    </div>
+    <div>
+      <label>Password</label>
+      <input id="password" type="password" value="TestPass123!">
+    </div>
+    <div>
+      <label>Full name (register only)</label>
+      <input id="fullname" value="Demo User">
+    </div>
+  </div>
+  <button onclick="register()">Register</button>
+  <button class="secondary" onclick="login()">Login</button>
+  <button class="secondary" onclick="logout()">Logout</button>
+</section>
+
+<section id="events-section" style="display:none">
+  <h2>2. Browse events</h2>
+  <button onclick="loadEvents()">Load events</button>
+  <div id="events-list"></div>
+</section>
+
+<section id="seats-section" style="display:none">
+  <h2>3. Pick seats — <span id="selected-event-title"></span></h2>
+  <div id="seat-map"></div>
+  <div class="row">
+    <button onclick="lockSeats()">Lock selected seats</button>
+  </div>
+</section>
+
+<section id="booking-section" style="display:none">
+  <h2>4. Confirm / release</h2>
+  <div id="booking-info"></div>
+  <div class="row">
+    <button onclick="confirmBooking()">Confirm (pay)</button>
+    <button class="danger" onclick="releaseBooking()">Release</button>
+  </div>
+</section>
+
+<section id="chat-section" style="display:none">
+  <h2>5. AI agent chat</h2>
+  <div class="chat-log" id="chat-log"></div>
+  <div class="row">
+    <input id="chat-input" placeholder="e.g. plan me a 3 day trip to Tokyo" onkeydown="if(event.key==='Enter')sendChat()">
+    <button onclick="sendChat()">Send</button>
+  </div>
+</section>
+
+<section>
+  <h2>Raw log</h2>
+  <pre id="log">Ready.</pre>
+</section>
+
+<script>
+const GATEWAY = "http://localhost:8000";
+const AGENT_GATEWAY = "http://localhost:8007";
+
+let token = localStorage.getItem("tf_token") || null;
+let conversationId = null;
+let currentEvent = null;
+let selectedSeats = new Set();
+let currentBookingId = null;
+
+function log(obj) {
+  const el = document.getElementById("log");
+  const text = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+  el.textContent = text + "\n\n" + el.textContent;
+}
+
+function setAuthStatus(msg, ok) {
+  document.getElementById("auth-status").innerHTML =
+    `<span class="status ${ok ? 'ok' : 'err'}">${msg}</span>`;
+}
+
+function showAuthedSections(show) {
+  for (const id of ["events-section", "chat-section"]) {
+    document.getElementById(id).style.display = show ? "block" : "none";
+  }
+}
+
+async function api(url, opts = {}) {
+  opts.headers = opts.headers || {};
+  if (token) opts.headers["Authorization"] = "Bearer " + token;
+  if (opts.body) opts.headers["Content-Type"] = "application/json";
+  const res = await fetch(url, opts);
+  let data;
+  try { data = await res.json(); } catch { data = null; }
+  log({ url, status: res.status, data });
+  if (!res.ok) throw new Error((data && data.error && data.error.message) || res.statusText);
+  return data;
+}
+
+async function register() {
+  const email = document.getElementById("email").value;
+  const password = document.getElementById("password").value;
+  const full_name = document.getElementById("fullname").value;
+  try {
+    const data = await api(`${GATEWAY}/api/v1/auth/register`, {
+      method: "POST",
+      body: JSON.stringify({ email, password, full_name }),
+    });
+    token = data.access_token;
+    localStorage.setItem("tf_token", token);
+    setAuthStatus("Registered + logged in as " + email, true);
+    showAuthedSections(true);
+  } catch (e) {
+    setAuthStatus("Register failed: " + e.message, false);
+  }
+}
+
+async function login() {
+  const email = document.getElementById("email").value;
+  const password = document.getElementById("password").value;
+  try {
+    const data = await api(`${GATEWAY}/api/v1/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+    token = data.access_token;
+    localStorage.setItem("tf_token", token);
+    setAuthStatus("Logged in as " + email, true);
+    showAuthedSections(true);
+  } catch (e) {
+    setAuthStatus("Login failed: " + e.message, false);
+  }
+}
+
+function logout() {
+  token = null;
+  localStorage.removeItem("tf_token");
+  setAuthStatus("Logged out", false);
+  showAuthedSections(false);
+}
+
+async function loadEvents() {
+  const data = await api(`${GATEWAY}/api/v1/events/`);
+  const listEl = document.getElementById("events-list");
+  listEl.innerHTML = "";
+  for (const ev of data.items) {
+    const div = document.createElement("div");
+    div.className = "event";
+    div.innerHTML = `<strong>${ev.title}</strong> — ${new Date(ev.event_date).toLocaleString()} <span class="status ok">${ev.status}</span>`;
+    div.onclick = () => selectEvent(ev);
+    listEl.appendChild(div);
+  }
+}
+
+async function selectEvent(ev) {
+  currentEvent = ev;
+  selectedSeats.clear();
+  document.getElementById("selected-event-title").textContent = ev.title;
+  document.getElementById("seats-section").style.display = "block";
+  const data = await api(`${GATEWAY}/api/v1/events/${ev.id}/seats`);
+  const mapEl = document.getElementById("seat-map");
+  mapEl.innerHTML = "";
+  for (const section of data.sections) {
+    const h = document.createElement("div");
+    h.innerHTML = `<strong>${section.section_name}</strong>`;
+    mapEl.appendChild(h);
+    for (const seat of section.seats) {
+      const s = document.createElement("span");
+      s.className = "seat " + (seat.status === "available" ? "available" : seat.status);
+      s.textContent = seat.seat_number;
+      s.title = `$${seat.price}`;
+      if (seat.status === "available") {
+        s.onclick = () => {
+          if (selectedSeats.has(seat.id)) { selectedSeats.delete(seat.id); s.classList.remove("selected"); }
+          else { selectedSeats.add(seat.id); s.classList.add("selected"); }
+        };
+      }
+      mapEl.appendChild(s);
+    }
+  }
+}
+
+async function lockSeats() {
+  if (!currentEvent || selectedSeats.size === 0) { alert("Pick at least one seat first"); return; }
+  try {
+    const data = await api(`${GATEWAY}/api/v1/bookings/lock`, {
+      method: "POST",
+      body: JSON.stringify({ event_id: currentEvent.id, seat_ids: [...selectedSeats] }),
+    });
+    currentBookingId = data.id;
+    document.getElementById("booking-section").style.display = "block";
+    document.getElementById("booking-info").innerHTML =
+      `<span class="status ok">Locked</span> booking <code>${data.id}</code> — total $${data.total_amount} ${data.currency}, status <strong>${data.status}</strong>`;
+  } catch (e) {
+    alert("Lock failed: " + e.message);
+  }
+}
+
+async function confirmBooking() {
+  if (!currentBookingId) return;
+  try {
+    const data = await api(`${GATEWAY}/api/v1/bookings/${currentBookingId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ payment_method: "card_test_4242" }),
+    });
+    document.getElementById("booking-info").innerHTML =
+      `<span class="status ok">Confirmed</span> booking <code>${data.id}</code> status <strong>${data.status}</strong>`;
+  } catch (e) {
+    alert("Confirm failed: " + e.message);
+  }
+}
+
+async function releaseBooking() {
+  if (!currentBookingId) return;
+  try {
+    await api(`${GATEWAY}/api/v1/bookings/${currentBookingId}/release`, { method: "POST" });
+    document.getElementById("booking-info").innerHTML = `<span class="status err">Released</span>`;
+    currentBookingId = null;
+  } catch (e) {
+    alert("Release failed: " + e.message);
+  }
+}
+
+async function sendChat() {
+  const input = document.getElementById("chat-input");
+  const message = input.value.trim();
+  if (!message) return;
+  const logEl = document.getElementById("chat-log");
+  logEl.innerHTML += `<div class="msg user">${message}</div>`;
+  input.value = "";
+  try {
+    const data = await api(`${AGENT_GATEWAY}/api/v1/agent/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message, conversation_id: conversationId }),
+    });
+    conversationId = data.conversation_id;
+    const cls = data.blocked ? "blocked" : "bot";
+    logEl.innerHTML += `<div class="msg ${cls}">${data.response}<br><small>intent: ${data.intent}${data.blocked ? " · BLOCKED: " + data.reasons.join(", ") : ""}</small></div>`;
+  } catch (e) {
+    logEl.innerHTML += `<div class="msg blocked">Error: ${e.message}</div>`;
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Restore session on load
+if (token) {
+  setAuthStatus("Restored session from previous login", true);
+  showAuthedSections(true);
+}
+document.getElementById("email").value = "demo_" + Date.now() + "@example.com";
+</script>
+</body>
+</html>

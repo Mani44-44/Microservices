@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-service
+  namespace: ticketflow
+  labels:
+    app: eval-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eval-service
+  template:
+    metadata:
+      labels:
+        app: eval-service
+    spec:
+      containers:
+        - name: eval-service
+          image: ticketflow-eval-service:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: eval-service-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_eval"
+            - name: SERVICE_NAME
+              value: "eval-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eval-service
+  namespace: ticketflow
+spec:
+  selector:
+    app: eval-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

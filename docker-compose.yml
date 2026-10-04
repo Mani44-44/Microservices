@@ -1,0 +1,374 @@
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP/HTTP
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: prometheus
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=localhost:8082
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+      - "9644:9644"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: redpanda-console
+    depends_on:
+      - redpanda
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - "8080:8080"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ticketflow-postgres
+    environment:
+      POSTGRES_USER: ticketflow
+      POSTGRES_PASSWORD: ticketflow123
+      POSTGRES_DB: ticketflow
+    ports:
+      - "5440:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/init-multi-db.sql:/docker-entrypoint-initdb.d/01-init-multi-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: notification-service
+    restart: on-failure
+    depends_on:
+      redpanda:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      KAFKA_BROKERS: redpanda:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_notification
+    ports:
+      - "8005:8000"
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+    container_name: analytics-service
+    restart: on-failure
+    depends_on:
+      redpanda:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      KAFKA_BROKERS: redpanda:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_analytics
+    ports:
+      - "8006:8000"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ticketflow-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  rag-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ticketflow-rag-postgres
+    environment:
+      POSTGRES_USER: ticketflow
+      POSTGRES_PASSWORD: ticketflow123
+      POSTGRES_DB: ticketflow_rag
+    ports:
+      - "5434:5432"
+    volumes:
+      - rag_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  # --- Phase 1: core booking services ---------------------------------
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: user-service
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_users
+    ports:
+      - "8001:8000"
+
+  catalog-service:
+    build:
+      context: .
+      dockerfile: services/catalog-service/Dockerfile
+    container_name: catalog-service
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_catalog
+      BOOKING_SERVICE_URL: http://booking-service:8000
+    ports:
+      - "8002:8000"
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: services/booking-service/Dockerfile
+    container_name: booking-service
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_booking
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: redpanda:29092
+      PAYMENT_SERVICE_URL: http://payment-service:8000
+      CATALOG_SERVICE_URL: http://catalog-service:8000
+    ports:
+      - "8003:8000"
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: payment-service
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_payment
+    ports:
+      - "8004:8000"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    container_name: gateway
+    restart: on-failure
+    depends_on:
+      - user-service
+      - catalog-service
+      - booking-service
+      - payment-service
+      - redis
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      REDIS_URL: redis://redis:6379
+      USER_SERVICE_URL: http://user-service:8000
+      CATALOG_SERVICE_URL: http://catalog-service:8000
+      BOOKING_SERVICE_URL: http://booking-service:8000
+      PAYMENT_SERVICE_URL: http://payment-service:8000
+    ports:
+      - "8000:8000"
+
+  # --- Phase 3: AI agent services --------------------------------------
+  rag-service:
+    build:
+      context: .
+      dockerfile: services/rag-service/Dockerfile
+    container_name: rag-service
+    restart: on-failure
+    depends_on:
+      rag-postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: rag-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_rag
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    ports:
+      - "8010:8000"
+
+  guardrail-service:
+    build:
+      context: .
+      dockerfile: services/guardrail-service/Dockerfile
+    container_name: guardrail-service
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_guardrail
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    ports:
+      - "8011:8000"
+
+  eval-service:
+    build:
+      context: .
+      dockerfile: services/eval-service/Dockerfile
+    container_name: eval-service
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_eval
+    ports:
+      - "8012:8000"
+
+  travel-planner-agent:
+    build:
+      context: .
+      dockerfile: services/travel-planner-agent/Dockerfile
+    container_name: travel-planner-agent
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_travel_planner
+      RAG_SERVICE_URL: http://rag-service:8000
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    ports:
+      - "8008:8000"
+
+  support-agent:
+    build:
+      context: .
+      dockerfile: services/support-agent/Dockerfile
+    container_name: support-agent
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_support_agent
+      RAG_SERVICE_URL: http://rag-service:8000
+      BOOKING_SERVICE_URL: http://booking-service:8000
+      PAYMENT_SERVICE_URL: http://payment-service:8000
+      CATALOG_SERVICE_URL: http://catalog-service:8000
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    ports:
+      - "8009:8000"
+
+  agent-gateway:
+    build:
+      context: .
+      dockerfile: services/agent-gateway/Dockerfile
+    container_name: agent-gateway
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      INTERNAL_SHARED_SECRET: dev-internal-secret-change-me
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ticketflow_agent_gateway
+      REDIS_URL: redis://redis:6379
+      RAG_SERVICE_URL: http://rag-service:8000
+      GUARDRAIL_SERVICE_URL: http://guardrail-service:8000
+      EVAL_SERVICE_URL: http://eval-service:8000
+      TRAVEL_PLANNER_URL: http://travel-planner-agent:8000
+      SUPPORT_AGENT_URL: http://support-agent:8000
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    ports:
+      - "8007:8000"
+
+volumes:
+  redpanda_data:
+  postgres_data:
+  rag_postgres_data:

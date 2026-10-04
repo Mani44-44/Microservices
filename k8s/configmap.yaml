@@ -1,0 +1,26 @@
+# Shared non-sensitive config, reused by most services via envFrom.
+# Hostnames below (postgres, redis, redpanda, rag-postgres) match the
+# docker-compose service/container names — this repo has no k8s manifests
+# for that infra yet, so these are the DNS names those pieces would need
+# to be deployed under (as Services) for this to resolve in-cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ticketflow-config
+  namespace: ticketflow
+data:
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "ticketflow"
+  REDIS_URL: "redis://redis:6379"
+  KAFKA_BROKERS: "redpanda:29092"
+  JWT_ALGORITHM: "HS256"
+  USER_SERVICE_URL: "http://user-service:8000"
+  CATALOG_SERVICE_URL: "http://catalog-service:8000"
+  BOOKING_SERVICE_URL: "http://booking-service:8000"
+  PAYMENT_SERVICE_URL: "http://payment-service:8000"
+  RAG_SERVICE_URL: "http://rag-service:8000"
+  GUARDRAIL_SERVICE_URL: "http://guardrail-service:8000"
+  EVAL_SERVICE_URL: "http://eval-service:8000"
+  TRAVEL_PLANNER_URL: "http://travel-planner-agent:8000"
+  SUPPORT_AGENT_URL: "http://support-agent:8000"

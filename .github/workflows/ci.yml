@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - agent-gateway
+          - analytics-service
+          - booking-service
+          - catalog-service
+          - eval-service
+          - gateway
+          - guardrail-service
+          - notification-service
+          - payment-service
+          - rag-service
+          - support-agent
+          - travel-planner-agent
+          - user-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r services/${{ matrix.service }}/requirements.txt
+
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/services/${{ matrix.service }}
+          INTERNAL_SHARED_SECRET: test-secret-for-ci-only-32chars
+        run: python -m pytest services/${{ matrix.service }} -q

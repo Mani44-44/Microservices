@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: ticketflow-services
+    static_configs:
+      - targets:
+          - gateway:8000
+          - user-service:8000
+          - catalog-service:8000
+          - booking-service:8000
+          - payment-service:8000
+          - notification-service:8000
+          - analytics-service:8000
+          - agent-gateway:8000
+          - travel-planner-agent:8000
+          - support-agent:8000
+          - rag-service:8000
+          - guardrail-service:8000
+          - eval-service:8000
+        labels:
+          group: ticketflow

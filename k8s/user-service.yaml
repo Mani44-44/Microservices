@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: ticketflow
+  labels:
+    app: user-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+    spec:
+      containers:
+        - name: user-service
+          image: ticketflow-user-service:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: user-service-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_users"
+            - name: SERVICE_NAME
+              value: "user-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: ticketflow
+spec:
+  selector:
+    app: user-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

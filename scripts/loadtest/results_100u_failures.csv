@@ -1,0 +1,3 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+GET,"/api/v1/events (list, KNOWN BROKEN)","gaierror(11001, 'getaddrinfo failed')",70,2026-08-30T13:07:08Z,2026-08-30T13:07:30Z
+GET,"/api/v1/events (list, KNOWN BROKEN)","HTTPError('429 Client Error: Too Many Requests for url: /api/v1/events (list, KNOWN BROKEN)')",128,2026-08-30T13:07:04Z,2026-08-30T13:07:50Z

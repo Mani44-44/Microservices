@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: support-agent
+  namespace: ticketflow
+  labels:
+    app: support-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: support-agent
+  template:
+    metadata:
+      labels:
+        app: support-agent
+    spec:
+      containers:
+        - name: support-agent
+          image: ticketflow-support-agent:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: support-agent-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_support_agent"
+            - name: SERVICE_NAME
+              value: "support-agent"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: support-agent
+  namespace: ticketflow
+spec:
+  selector:
+    app: support-agent
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-planner-agent
+  namespace: ticketflow
+  labels:
+    app: travel-planner-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-planner-agent
+  template:
+    metadata:
+      labels:
+        app: travel-planner-agent
+    spec:
+      containers:
+        - name: travel-planner-agent
+          image: ticketflow-travel-planner-agent:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: travel-planner-agent-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_travel_planner"
+            - name: SERVICE_NAME
+              value: "travel-planner-agent"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-planner-agent
+  namespace: ticketflow
+spec:
+  selector:
+    app: travel-planner-agent
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

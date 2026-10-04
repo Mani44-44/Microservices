@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: ticketflow
+  labels:
+    app: analytics-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-service
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+    spec:
+      containers:
+        - name: analytics-service
+          image: ticketflow-analytics-service:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: analytics-service-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_analytics"
+            - name: SERVICE_NAME
+              value: "analytics-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: ticketflow
+spec:
+  selector:
+    app: analytics-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

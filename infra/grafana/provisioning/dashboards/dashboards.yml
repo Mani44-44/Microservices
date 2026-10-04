@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: ticketflow
+    orgId: 1
+    folder: TicketFlow
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

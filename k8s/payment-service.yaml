@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: ticketflow
+  labels:
+    app: payment-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+        - name: payment-service
+          image: ticketflow-payment-service:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: payment-service-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_payment"
+            - name: SERVICE_NAME
+              value: "payment-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: ticketflow
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

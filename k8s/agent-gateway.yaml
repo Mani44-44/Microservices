@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-gateway
+  namespace: ticketflow
+  labels:
+    app: agent-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-gateway
+  template:
+    metadata:
+      labels:
+        app: agent-gateway
+    spec:
+      containers:
+        - name: agent-gateway
+          image: ticketflow-agent-gateway:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+            - secretRef:
+                name: agent-gateway-secret
+          env:
+            - name: POSTGRES_DB
+              value: "ticketflow_agent_gateway"
+            - name: SERVICE_NAME
+              value: "agent-gateway"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-gateway
+  namespace: ticketflow
+spec:
+  selector:
+    app: agent-gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
