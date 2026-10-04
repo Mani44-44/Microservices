@@ -168,7 +168,7 @@ Infra containers: PostgreSQL (`:5440` app DBs, `:5434` `rag-postgres`), Redis (`
 
 - **Language/Runtime:** Python 3.12, fully async
 - **Web framework:** FastAPI + Uvicorn
-- **Data:** SQLAlchemy 2.0 (async) + asyncpg, Alembic migrations, PostgreSQL 15 (pgvector for RAG)
+- **Data:** SQLAlchemy 2.0 (async) + asyncpg, PostgreSQL 15 (pgvector for RAG); tables created via `create_all` (no migrations yet)
 - **Caching / locks:** Redis (`redis[asyncio]`), TTL-based seat locks, refresh-token revocation
 - **Messaging:** Redpanda (Kafka-wire-compatible), outbox pattern + idempotent consumers
 - **Auth/security:** PyJWT, bcrypt, Fernet field-level encryption, HMAC-verified payment webhooks, shared-secret internal mesh auth
@@ -240,15 +240,9 @@ psql -h localhost -p 5433 -U ticketflow -c "CREATE DATABASE ticketflow_booking;"
 psql -h localhost -p 5433 -U ticketflow -c "CREATE DATABASE ticketflow_payment;"
 ```
 
-### 3. Run Alembic migrations (per service)
+### 3. Tables
 
-```powershell
-foreach ($svc in "user-service","catalog-service","booking-service","payment-service") {
-    Push-Location "services\$svc"
-    alembic upgrade head
-    Pop-Location
-}
-```
+There are no Alembic migrations yet: each service creates its own tables with SQLAlchemy `create_all` on startup, so there is nothing to run here. (`create_all` adds missing tables but never alters existing ones — after a column change, drop and recreate the dev database.)
 
 ### 4. Start services
 
@@ -309,50 +303,58 @@ Copy `.env.example` to `.env` and fill in your values.
 
 ## API Overview
 
-All core endpoints are reachable through the **API Gateway** at `http://localhost:8000` (docs: `/docs`); chat/agent endpoints go through the **Agent Gateway** at `http://localhost:8007` (docs: `/docs`).
+Clients talk to two public edges: the **API Gateway** (`http://localhost:8000`, docs at `/api/v1/docs`) and the **Agent Gateway** (`http://localhost:8007`, docs at `/docs`). Every other service is mesh-internal and rejects requests without the `X-Internal-Secret` header.
 
-### User Service (`/users`)
+### Public — API Gateway (`/api/v1`)
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/users/register` | None | Register a new user |
-| POST | `/users/login` | None | Login, returns access + refresh JWT |
-| POST | `/users/refresh` | Refresh | Obtain a new access token |
-| POST | `/users/logout` | Bearer | Revoke refresh token |
-| GET/PATCH | `/users/me` | Bearer | Get/update current user profile |
+| Method | Path | Auth | Proxies to | Description |
+|---|---|---|---|---|
+| POST | `/api/v1/auth/register` | None (per-IP limit) | user-service `/register` | Register, returns access + refresh token |
+| POST | `/api/v1/auth/login` | None (per-IP limit) | user-service `/login` | Login, returns access + refresh token |
+| POST | `/api/v1/auth/refresh` | Refresh token | user-service `/refresh` | Rotate refresh token |
+| GET | `/api/v1/events/` | Bearer | catalog `/events/` | List/search published events (paginated) |
+| GET | `/api/v1/events/{id}` | Bearer | catalog `/events/{id}` | Event details + venue |
+| GET | `/api/v1/events/{id}/seats` | Bearer | catalog `/events/{id}/seats` | Seat map with `available` / `locked` / `booked` status |
+| POST | `/api/v1/bookings/lock` | Bearer | booking `/bookings/lock` | Lock seats, create a PENDING booking |
+| POST | `/api/v1/bookings/{id}/confirm` | Bearer | booking `/bookings/{id}/confirm` | Pay for and confirm a PENDING booking |
+| POST | `/api/v1/bookings/{id}/release` | Bearer | booking `/bookings/{id}/release` | Cancel a PENDING booking, release locks |
+| GET | `/api/v1/bookings/{id}` | Bearer | booking `/bookings/{id}` | Get one of your bookings |
 
-### Catalog Service (`/catalog`)
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/catalog/events` | None | List/search events |
-| GET | `/catalog/events/{id}` | None | Get event details |
-| POST/PATCH/DELETE | `/catalog/events/{id}` | Admin | Manage events |
-| GET | `/catalog/venues` / `/catalog/venues/{id}` | None | List venues / seat map |
-
-### Booking Service (`/bookings`)
+### Public — Agent Gateway (`/api/v1/agent`)
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/bookings` | Bearer | Create booking + lock seats (Redis) |
-| GET | `/bookings` / `/bookings/{id}` | Bearer | List / get bookings |
-| DELETE | `/bookings/{id}` | Bearer | Cancel booking, release seats |
-| POST | `/bookings/{id}/confirm` | Bearer | Confirm booking after payment |
+| POST | `/api/v1/agent/chat` | Bearer | Chat entry point — routes to travel-planner, support agent, RAG, or canned reply |
+| GET | `/api/v1/agent/conversations` | Bearer | List your conversations |
+| GET / DELETE | `/api/v1/agent/conversations/{id}` | Bearer | Get / end a conversation |
+| POST | `/api/v1/agent/conversations/{id}/escalate` | Bearer | Escalate to a human |
 
-### Payment Service (`/payments`)
+### Mesh-internal (not routed by either gateway)
 
-| Method | Path | Auth | Description |
+| Service | Method | Path | Called by |
 |---|---|---|---|
-| POST | `/payments/initiate` | Bearer | Create a payment intent |
-| GET | `/payments/{id}` | Bearer | Get payment status |
-| POST | `/payments/webhook` | HMAC | Handle payment provider webhooks |
-| POST | `/payments/{id}/refund` | Bearer | Request a refund |
+| user-service | POST / GET / PATCH | `/logout`, `/me` | (not yet exposed by the gateway) |
+| booking-service | POST | `/bookings/{id}/cancel` | support-agent — cancels a CONFIRMED booking before a refund (user JWT required) |
+| booking-service | GET | `/users/{id}/bookings` | booking history (own bookings, or any with `role=admin`) |
+| booking-service | GET | `/internal/events/{id}/locked-seats` | catalog-service — returns `locked_seat_ids` and `booked_seat_ids` |
+| catalog-service | GET | `/events/{id}/seats/{seat_id}` | booking-service — seat price (`include_status=false` skips the status lookup) |
+| payment-service | POST | `/payments/create-intent`, `/payments/{id}/confirm` | booking-service (idempotency key = booking id) |
+| payment-service | GET | `/payments/{id}`, `/internal/payments/by-booking/{id}` | booking-service, support-agent |
+| payment-service | POST | `/payments/{id}/refund` | support-agent |
+| payment-service | POST | `/payments/webhook` | payment provider (HMAC-signed) |
 
-### Agent Gateway (`/api/v1/agent`)
+### Error envelope
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/api/v1/agent/chat` | Bearer | Chat entry point — routes to travel-planner or support agent |
+Every service returns errors as `{"error": {"code": "...", "message": "...", "details": {}, "correlation_id": "..."}}`. Booking codes worth handling in a client:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `SEAT_ALREADY_LOCKED` | 409 | Another user is holding the seat right now — retry later or pick another |
+| `SEAT_ALREADY_BOOKED` | 409 | The seat has been sold |
+| `SEAT_NOT_FOUND` | 422 | Seat does not exist at this event's venue |
+| `CATALOG_UNAVAILABLE` | 503 | Seat pricing unavailable; no booking was created — retry |
+| `BOOKING_EXPIRED` | 409 | The seat hold lapsed before payment — start a new booking |
+| `PAYMENT_STATUS_UNKNOWN` | 503 | Payment outcome couldn't be confirmed; booking is still PENDING — retrying confirm is safe (the payment intent is idempotent, no double charge) |
 
 ---
 
@@ -458,7 +460,7 @@ ticketflow/
     └── eval-service/          # Conversation trace log  :8012
 ```
 
-Each service follows the same internal shape: `app/{main,config,database,models,schemas,dependencies}.py`, `app/routers/`, `alembic/` (where it owns a schema), `tests/`.
+Each service follows roughly the same internal shape: `app/{main,config,database,models,schemas}.py`, `app/routes/`, `tests/`.
 
 ---
 
@@ -469,6 +471,7 @@ Each service follows the same internal shape: `app/{main,config,database,models,
 - HMAC-verified payment webhooks
 - Shared-secret internal mesh auth — every internal service call carries an `internal-mesh-secret` header
 - Admin role for cross-user booking-history reads
+- Internal secret compared in constant time (`hmac.compare_digest`)
 - Guardrail service scans agent chat input/output for prompt-injection and PII, redacting before it's stored or returned
 
 ---
@@ -476,7 +479,12 @@ Each service follows the same internal shape: `app/{main,config,database,models,
 ## Notes & Known Issues
 
 - `PYTHONPATH` must include the repo root for inter-service shared imports (`start_all.ps1` / `start_phase3.ps1` handle this automatically).
-- Seat locks use Redis key pattern `seat_lock:{event_id}:{seat_id}` with a configurable TTL.
+- Seat locks use Redis key pattern `seat_lock:{event_id}:{seat_id}` with a configurable TTL. Locks only cover the hold before payment; a sold seat is recorded in booking-service's `seat_reservations` table, whose `UNIQUE(event_id, seat_id)` constraint is what guarantees a seat is never sold twice (seats are reserved *before* the card is charged). Expiry and TTL extension only ever touch locks still owned by the booking's user.
+- **Payment outcome unknown:** if booking-service can't learn whether a charge succeeded (payment-service timeout and status read-back both fail), the booking stays PENDING and confirm returns 503 `PAYMENT_STATUS_UNKNOWN`; a retry reuses the idempotent payment intent. If the user never retries, the expiry job expires the booking and flags the `BOOKING_EXPIRED` event with `payment_status_unknown: true` — there is no automatic reconciliation job yet, so such events need manual follow-up.
+- **Refunds** cancel the booking first (seats go back on sale), then refund. If the refund call fails after the cancel, the support agent escalates to a human with the booking already cancelled.
+- The payment confirm/refund row locks (`SELECT ... FOR UPDATE`) are not exercised by the SQLite-based test suite; they rely on PostgreSQL semantics.
+- The guardrail checks in agent-gateway **fail open** by design: if guardrail-service is down, input is not blocked and output is not redacted (logged loudly as `guardrail_*_check_failed`).
+- No Alembic migrations exist yet; tables are created with `create_all` at startup, which creates new tables (e.g. `seat_reservations`) on existing databases but never alters existing ones.
 - The event backbone (Redpanda + notification/analytics consumers) is **idempotent by design**: a `processed_events` table keyed by event id protects against double-processing, and a failing handler retries 3x before routing to `booking.events.dlq` instead of blocking the partition.
 - k8s manifests are validated (YAML-parse clean) but **not deployed against a live cluster** in this repo's history — treat as validated-but-undeployed scaffolding.
 - The refund amount is always computed server-side by `support-agent`'s own rules engine (>7 days out = 100%, within 7 days = 50%, within 24h = 0%, event cancelled = 100%) — a user-stated amount is never trusted.
