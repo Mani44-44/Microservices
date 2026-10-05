@@ -11,6 +11,9 @@ PATCH  /me         – update full_name / phone (200)
 GET    /health     – liveness probe (200)
 """
 
+import asyncio
+import functools
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -54,6 +57,12 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    """A real bcrypt hash to verify against when the email doesn't exist."""
+    return hash_password(secrets.token_urlsafe(16))
 
 
 def _correlation_id(request: Request) -> str:
@@ -181,7 +190,7 @@ async def health_check():
 async def register(
     payload: UserRegister,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     """Create a new user account and return a token pair."""
     cid = _correlation_id(request)
@@ -201,7 +210,8 @@ async def register(
     user = User(
         id=uuid.uuid4(),
         email=payload.email,
-        password_hash=hash_password(payload.password),
+        # bcrypt is CPU-bound (~0.2s); run it off the event loop.
+        password_hash=await asyncio.to_thread(hash_password, payload.password),
         full_name=encrypt_field(payload.full_name),
         phone=encrypt_field(payload.phone) if payload.phone is not None else None,
     )
@@ -233,7 +243,7 @@ async def register(
 async def login(
     payload: UserLogin,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     """Authenticate with email + password and return a token pair."""
     cid = _correlation_id(request)
@@ -241,8 +251,14 @@ async def login(
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    # Use consistent error to prevent user enumeration
-    if user is None or not verify_password(payload.password, user.password_hash):
+    # Use consistent error to prevent user enumeration — and spend the same
+    # bcrypt time for unknown emails, or response latency reveals which exist.
+    password_ok = await asyncio.to_thread(
+        verify_password,
+        payload.password,
+        user.password_hash if user is not None else _dummy_password_hash(),
+    )
+    if user is None or not password_ok:
         log.warning("login_failed", email=payload.email, correlation_id=cid)
         raise _error(
             status.HTTP_401_UNAUTHORIZED,
@@ -281,7 +297,7 @@ async def login(
 async def refresh_token(
     payload: RefreshRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     """Rotate a refresh token: revoke old one, issue a new token pair."""
     cid = _correlation_id(request)
@@ -382,7 +398,7 @@ async def refresh_token(
 async def logout(
     payload: LogoutRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     """Revoke a refresh token, effectively logging the client out."""
     cid = _correlation_id(request)
@@ -419,7 +435,7 @@ async def logout(
 async def get_me(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     """Return the authenticated user's profile."""
     user = await _get_current_user_from_bearer(request, credentials, db)
@@ -437,7 +453,7 @@ async def update_me(
     payload: UserUpdate,
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     """Update the authenticated user's full_name and/or phone."""
     cid = _correlation_id(request)
