@@ -4,6 +4,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.embeddings import chunk_text, embed_text
 from app.models import Document, DocumentChunk
 from libs.llm.groq_client import LLMError
@@ -65,6 +66,7 @@ async def search_chunks(
     category: str | None = None,
     top_k: int = 5,
     llm_client: Any | None = None,
+    min_score: float | None = None,
 ) -> list[dict]:
     """Cosine-distance nearest-neighbor search over document_chunks (pgvector
     `<=>` operator), followed by an optional real-LLM relevance re-rank of the
@@ -72,7 +74,13 @@ async def search_chunks(
 
     `llm_client` is dependency-injected (real GroqClient in production,
     FakeGroqClient in tests). If None, or if the rerank call fails, the
-    original mock-embedding order is returned unchanged."""
+    original embedding order is returned unchanged.
+
+    Chunks scoring below `min_score` (default: settings.min_relevance_score)
+    are dropped, so an unanswerable query returns [] rather than the least
+    irrelevant chunk."""
+    if min_score is None:
+        min_score = get_settings().min_relevance_score
     query_embedding = embed_text(query)
     distance = DocumentChunk.embedding.cosine_distance(query_embedding)
 
@@ -92,6 +100,7 @@ async def search_chunks(
             "metadata": chunk.doc_metadata,
         }
         for chunk, distance_val in rows
+        if 1.0 - distance_val >= min_score
     ]
 
     if llm_client is None or not results:
@@ -127,3 +136,22 @@ async def rerank_chunks(llm_client: Any, query: str, candidates: list[dict], top
     except LLMError as exc:
         log.warning("rerank_failed_fallback_to_mock_order", error=str(exc))
         return candidates[:top_k]
+
+
+async def reembed_if_stale(db: AsyncSession) -> int:
+    """Re-embed every stored chunk if the stored vectors were produced by a
+    different embed_text() than the current one (e.g. after an embedder
+    upgrade). Checks one chunk; if it matches, does nothing. Returns the
+    number of chunks re-embedded. Caller commits."""
+    sample = (await db.execute(select(DocumentChunk).limit(1))).scalar_one_or_none()
+    if sample is None:
+        return 0
+    current = embed_text(sample.content)
+    if max(abs(a - b) for a, b in zip(sample.embedding, current)) < 1e-6:
+        return 0
+
+    chunks = (await db.execute(select(DocumentChunk))).scalars().all()
+    for chunk in chunks:
+        chunk.embedding = embed_text(chunk.content)
+    await db.flush()
+    return len(chunks)

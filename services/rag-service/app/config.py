@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     postgres_db: str = "ticketflow_rag"
     service_name: str = "rag-service"
 
+    # Cosine similarity below which a chunk is not returned at all. On the
+    # seed corpus every correct top hit scores >= ~0.2 and every unrelated
+    # one <= ~0.13 (see tests/test_retrieval_quality.py), so callers get no
+    # result -- "I don't have that information" / escalation -- instead of a
+    # confidently wrong policy snippet.
+    min_relevance_score: float = 0.15
+
     @property
     def database_url(self) -> str:
         return (

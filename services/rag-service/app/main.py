@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_db, init_db
 from app.models import Document
-from app.rag import ingest_document, search_chunks
+from app.rag import ingest_document, reembed_if_stale, search_chunks
 from app.schemas import DocumentIn, DocumentOut, SearchIn, SearchOut
 from libs.llm.groq_client import GroqClient
 
@@ -49,6 +49,10 @@ async def lifespan(app: FastAPI):
                 await ingest_document(db, **doc)
             await db.commit()
             log.info("seed_data_loaded", documents=len(SEED_DOCUMENTS))
+        reembedded = await reembed_if_stale(db)
+        if reembedded:
+            await db.commit()
+            log.info("chunks_reembedded", count=reembedded)
 
     log.info("database_initialised")
     yield

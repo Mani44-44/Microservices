@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -108,8 +109,16 @@ def main() -> int:
 
     alice, bob = register(), register()
     events = pick_events(alice)
-    # >7 days out on the seed data -> full refund window
-    event = next(e for t, e in events.items() if t.startswith("Taylor Swift"))
+    # The refund check needs the full-refund window (>7 days out); pick by
+    # date, not title, so the script keeps working as seeded events approach.
+    cutoff = datetime.now(timezone.utc) + timedelta(days=8)
+    future = [
+        e for e in events.values()
+        if datetime.fromisoformat(e["event_date"].replace("Z", "+00:00")).astimezone(timezone.utc) > cutoff
+    ]
+    if not future:
+        sys.exit("No published event is more than 8 days out; re-seed with dates in the future.")
+    event = min(future, key=lambda e: e["event_date"])
     other_venue_event = next(e for e in events.values() if e["venue_id"] != event["venue_id"])
     seats = seat_map(alice, event["id"])
     available = [sid for sid, s in seats.items() if s["status"] == "available"]

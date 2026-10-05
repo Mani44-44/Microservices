@@ -85,3 +85,35 @@ async def test_search_falls_back_to_mock_order_on_llm_error(pg_session):
         pg_session, query="refund policy", category="support", top_k=5, llm_client=FakeGroqClient()
     )
     assert [r["chunk_id"] for r in fallback] == [r["chunk_id"] for r in mock_order]
+
+
+async def test_search_returns_nothing_for_unrelated_query(pg_session):
+    await ingest_document(
+        pg_session, content="Refunds are full within 7 days.", category="support", source="policy"
+    )
+    await pg_session.commit()
+
+    assert await search_chunks(pg_session, query="what is the wifi password", category="support") == []
+    hits = await search_chunks(pg_session, query="are refunds full within 7 days", category="support")
+    assert hits and hits[0]["score"] >= settings.min_relevance_score
+
+
+async def test_reembed_if_stale_rewrites_vectors_from_an_older_embedder(pg_session):
+    from sqlalchemy import select
+
+    from app.embeddings import _fallback_vector, embed_text
+    from app.models import DocumentChunk
+    from app.rag import reembed_if_stale
+
+    await ingest_document(pg_session, content="Transfers are free.", category="support", source="t")
+    await pg_session.commit()
+    # Simulate vectors written by the previous (hash-seeded) embedder.
+    for chunk in (await pg_session.execute(select(DocumentChunk))).scalars():
+        chunk.embedding = _fallback_vector(chunk.content)
+    await pg_session.commit()
+
+    assert await reembed_if_stale(pg_session) >= 1
+    await pg_session.commit()
+    chunk = (await pg_session.execute(select(DocumentChunk).limit(1))).scalar_one()
+    assert max(abs(a - b) for a, b in zip(chunk.embedding, embed_text(chunk.content))) < 1e-6
+    assert await reembed_if_stale(pg_session) == 0
