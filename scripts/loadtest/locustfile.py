@@ -20,20 +20,13 @@ Run:
         --run-time 45s --host http://localhost:8000 \
         --csv scripts/loadtest/results_20u
 
-NOTE -- GET /api/v1/events (catalog list) is broken through the gateway.
-services/gateway/app/routes/events.py builds the proxy target as
-f"{catalog_service_url}/events" (no trailing slash). The catalog-service
-route is registered at "/events/" (APIRouter(prefix="/events") + "/"), so
-FastAPI's redirect_slashes kicks in server-side and 307-redirects to
-"http://catalog-service:8000/events/" -- catalog-service's internal Docker
-hostname, unreachable from outside the compose network. Any real external
-client following that redirect gets a connection failure. This test hits
-that endpoint for real every browse cycle and reports it honestly rather
-than working around it -- see docs/load-test-results.md.
+NOTE -- GET /api/v1/events (catalog list) used to be broken through the
+gateway (a missing trailing slash made catalog-service 307-redirect to its
+internal Docker hostname). That was fixed in the gateway (see
+docs/runbooks.md) and the endpoint is now exercised like any other.
 
-Because the list endpoint is unusable, a small pool of real event/seat IDs
-is fetched once at import time directly from catalog-service (port 8002,
-bypassing the broken gateway route) using the dev internal-mesh secret from
+A small pool of real event/seat IDs is fetched once at import time
+directly from catalog-service (port 8002) using the dev internal-mesh secret from
 docker-compose.yml, purely to seed this test's data -- not part of the
 measured traffic.
 """
@@ -66,8 +59,8 @@ def _decode_user_id(access_token: str) -> str:
 def _fetch_seed_pool() -> list[dict]:
     """
     One-time, out-of-band fetch of real (event_id, seat_ids) pairs directly
-    from catalog-service, since the gateway's list endpoint is broken (see
-    module docstring). Not part of measured load-test traffic.
+    from catalog-service, so seeding the pool isn't counted in (or rate-limited
+    by) the measured gateway traffic.
     """
     try:
         resp = requests.get(
@@ -169,17 +162,17 @@ class TicketFlowUser(HttpUser):
         if not self.token:
             return
 
-        # Real broken endpoint -- hit it as a real client would and let
-        # Locust's default success/failure logic report it honestly (no
-        # catch_response override here). Following the 307 lands on
-        # catalog-service's internal Docker hostname, which is unreachable
-        # from outside the compose network, so this reliably surfaces as a
-        # connection failure -- that IS the finding, not a test bug.
-        self.client.get(
-            "/api/v1/events",
+        with self.client.get(
+            "/api/v1/events/",
             headers=self._auth_headers(),
-            name="/api/v1/events (list, KNOWN BROKEN)",
-        )
+            catch_response=True,
+            name="/api/v1/events (list)",
+        ) as resp:
+            # 429: shared per-IP limit (all simulated users share one IP).
+            if resp.status_code in (200, 429):
+                resp.success()
+            else:
+                resp.failure(f"unexpected status {resp.status_code}: {resp.text[:200]}")
 
         if not SEED_POOL:
             return
