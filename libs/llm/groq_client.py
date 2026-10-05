@@ -39,13 +39,19 @@ class ToolCallResult:
 
 
 class GroqClient:
-    """Real client -- calls the live Groq API. Never used in tests."""
+    """Real client -- calls the live Groq API. Never used in tests.
+
+    Constructing without GROQ_API_KEY is allowed: every call then raises
+    LLMError, which each caller already handles by falling back to its
+    deterministic (regex/template/heuristic) path. A missing key therefore
+    degrades the agent layer instead of crash-looping the service at startup.
+    """
 
     def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL):
         self.api_key = api_key or os.environ.get("GROQ_API_KEY", "")
         self.model = model
         if not self.api_key:
-            raise LLMError("GROQ_API_KEY not set")
+            log.warning("groq_api_key_missing", fallback="deterministic")
 
     async def complete(
         self,
@@ -117,6 +123,8 @@ class GroqClient:
         return ToolCallResult(name=call["name"], arguments=arguments)
 
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+        if not self.api_key:
+            raise LLMError("GROQ_API_KEY not set")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
