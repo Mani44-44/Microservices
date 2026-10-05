@@ -2,6 +2,7 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:latest
     container_name: jaeger
+    restart: unless-stopped
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
@@ -11,6 +12,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.0.1
     container_name: prometheus
+    restart: unless-stopped
     volumes:
       - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -19,6 +21,7 @@ services:
   grafana:
     image: grafana/grafana:11.4.0
     container_name: grafana
+    restart: unless-stopped
     depends_on:
       - prometheus
     environment:
@@ -34,6 +37,7 @@ services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
     container_name: redpanda
+    restart: unless-stopped
     command:
       - redpanda
       - start
@@ -54,6 +58,7 @@ services:
   redpanda-console:
     image: docker.redpanda.com/redpandadata/console:v2.7.2
     container_name: redpanda-console
+    restart: unless-stopped
     depends_on:
       - redpanda
     environment:
@@ -64,6 +69,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: ticketflow-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ticketflow
       POSTGRES_PASSWORD: ticketflow123
@@ -125,6 +131,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ticketflow-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -136,6 +143,7 @@ services:
   rag-postgres:
     image: pgvector/pgvector:pg16
     container_name: ticketflow-rag-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ticketflow
       POSTGRES_PASSWORD: ticketflow123
