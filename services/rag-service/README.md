@@ -28,21 +28,28 @@ Needs a Postgres instance with the `pgvector` extension on port 5434 (see
 
 No auth on any endpoint — internal service-to-service calls only.
 
-## Known limitation: mock embeddings
+## Embeddings: lexical, no API key
 
-There are no LLM/embedding API keys in this project. `app/embeddings.py`
-hashes each chunk's text (SHA-256) and uses it to seed a PRNG that produces a
-deterministic, L2-normalized 1536-dim vector. Same text always embeds to the
-same vector, which keeps ingestion/search testable, but **similar text does
-not embed to similar vectors** — it's a hash, not a real embedding, so
-retrieval order out of `search_chunks` on its own is not meaningful.
+`app/embeddings.py` builds a deterministic, feature-hashed bag-of-words
+vector (lowercased words minus stopwords, light suffix stemming, `1 + log(tf)`
+weights, signed hashing into 1536 dims, L2-normalized). Texts that share
+words are close under cosine distance, so pgvector `<=>` search returns
+lexically relevant chunks: 100% top-1 on the 20 labelled questions in
+`tests/test_retrieval_quality.py` (the previous SHA-256-seeded random vectors
+scored 10%).
 
-To compensate, `/search` runs a real Groq LLM (`openai/gpt-oss-20b`, via
-`libs/llm/groq_client.py`) as a **relevance re-ranking pass on top of** the
-mock-retrieved top-K — genuine LLM judgment reorders the candidates the mock
-step already picked, it does not replace mock retrieval itself. On a Groq
-error/timeout the original mock order is returned unchanged (see
-`app/rag.py::rerank_chunks`).
+**Limitation:** it is keyword matching, not semantics — a question that
+shares no word stem with the answer ("money back" vs "refund") won't find it.
+Results scoring below `MIN_RELEVANCE_SCORE` (default 0.15) are dropped, so
+such questions get no result (the agent says it doesn't know / escalates)
+rather than an unrelated snippet. To go further, swap a real embedding model
+in behind `embed_text()`; on startup `reembed_if_stale()` notices stored
+vectors from a different embedder and re-embeds them.
+
+If `GROQ_API_KEY` is set, `/search` additionally re-ranks the retrieved
+top-K with an LLM (`openai/gpt-oss-20b`, via `libs/llm/groq_client.py`); on a
+Groq error/timeout, or with no key, the embedding order is returned
+unchanged (see `app/rag.py::rerank_chunks`).
 
 ## Tests
 
