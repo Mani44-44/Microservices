@@ -7,6 +7,8 @@ clear message if its service is unreachable, rather than failing the suite.
 import uuid
 
 import httpx
+
+from libs.security import internal_headers
 import pytest
 
 from app.config import get_settings
@@ -29,7 +31,7 @@ async def test_real_travel_planner_plan_endpoint():
             f"Travel Planner Agent ({settings.travel_planner_url}) is not reachable - "
             "skipping live integration test."
         )
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers=internal_headers()) as client:
         resp = await client.post(
             f"{settings.travel_planner_url}/plan",
             json={
@@ -50,7 +52,7 @@ async def test_real_support_agent_handle_endpoint():
             f"Support Agent ({settings.support_agent_url}) is not reachable - "
             "skipping live integration test."
         )
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers=internal_headers()) as client:
         resp = await client.post(
             f"{settings.support_agent_url}/handle",
             json={

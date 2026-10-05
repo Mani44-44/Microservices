@@ -12,6 +12,8 @@ Two layers:
 from unittest.mock import AsyncMock, patch
 
 import httpx
+
+from libs.security import internal_headers
 import pytest
 
 from app.config import get_settings
@@ -89,7 +91,7 @@ async def test_redteam_string_blocked_by_real_guardrail_if_reachable(text):
             "Guardrail Service (localhost:8011) is not reachable - "
             "skipping live red-team check. Run the service to exercise this test."
         )
-    async with httpx.AsyncClient(timeout=5.0) as http_client:
+    async with httpx.AsyncClient(timeout=5.0, headers=internal_headers()) as http_client:
         resp = await http_client.post(
             f"{settings.guardrail_service_url}/guardrails/check-input", json={"text": text}
         )
