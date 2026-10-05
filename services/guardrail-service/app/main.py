@@ -161,7 +161,7 @@ async def _log_check(db: AsyncSession, check_type: str, text: str, passed: bool,
 # exposed publicly; they are called service-to-service by the agent
 # gateway/support agent before/after LLM calls.
 @app.post("/guardrails/check-input", response_model=CheckInputResponse)
-async def check_input(body: CheckInputRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def check_input(body: CheckInputRequest, request: Request, db: AsyncSession = Depends(get_db, scope="function")):
     injection = checks.detect_injection(body.text)
     pii_found = checks.detect_pii(body.text)
     redacted_text, _ = checks.redact(body.text)
@@ -207,7 +207,7 @@ async def check_input(body: CheckInputRequest, request: Request, db: AsyncSessio
 
 
 @app.post("/guardrails/check-output", response_model=CheckOutputResponse)
-async def check_output(body: CheckOutputRequest, db: AsyncSession = Depends(get_db)):
+async def check_output(body: CheckOutputRequest, db: AsyncSession = Depends(get_db, scope="function")):
     redacted_text, pii_found = checks.redact(body.text)
     hallucination = checks.check_hallucination(body.text, body.context_chunks)
 

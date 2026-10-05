@@ -47,7 +47,7 @@ async def chat(
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
     bearer_token: str = Depends(get_bearer_token),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     allowed = await check_and_increment(request.app.state.redis, str(user_id))
     if not allowed:
@@ -63,7 +63,7 @@ async def chat(
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     stmt = select(Conversation).where(Conversation.user_id == user_id).order_by(Conversation.created_at.desc())
     result = await db.execute(stmt)
@@ -74,7 +74,7 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: uuid.UUID,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     conv = await db.get(Conversation, conversation_id)
     if conv is None or conv.user_id != user_id:
@@ -86,7 +86,7 @@ async def get_conversation(
 async def end_conversation(
     conversation_id: uuid.UUID,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     conv = await db.get(Conversation, conversation_id)
     if conv is None or conv.user_id != user_id:
@@ -101,7 +101,7 @@ async def escalate_conversation(
     conversation_id: uuid.UUID,
     body: EscalateRequest,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     conv = await db.get(Conversation, conversation_id)
     if conv is None or conv.user_id != user_id:

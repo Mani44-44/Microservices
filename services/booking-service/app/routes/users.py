@@ -29,7 +29,7 @@ async def get_user_bookings_endpoint(
     request: Request,
     current_user_id: uuid.UUID = Depends(get_current_user_id),
     current_user_role: str = Depends(get_current_user_role),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
     size: int = Query(default=20, ge=1, le=100, description="Items per page"),
 ):

@@ -23,7 +23,7 @@ router = APIRouter(prefix="/internal", tags=["internal"])
     "/payments/by-booking/{booking_id}",
     summary="Look up the most recent payment for a booking (internal use only)",
 )
-async def get_payment_by_booking(booking_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_payment_by_booking(booking_id: uuid.UUID, db: AsyncSession = Depends(get_db, scope="function")):
     result = await db.execute(
         select(Payment)
         .where(Payment.booking_id == booking_id)

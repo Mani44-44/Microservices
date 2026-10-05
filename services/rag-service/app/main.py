@@ -155,7 +155,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 @app.post("/documents", response_model=DocumentOut)
-async def create_document(body: DocumentIn, db: AsyncSession = Depends(get_db)):
+async def create_document(body: DocumentIn, db: AsyncSession = Depends(get_db, scope="function")):
     document_id, chunks_created = await ingest_document(
         db, content=body.content, category=body.category, source=body.source, metadata=body.metadata
     )
@@ -163,7 +163,7 @@ async def create_document(body: DocumentIn, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/search", response_model=SearchOut)
-async def search(body: SearchIn, request: Request, db: AsyncSession = Depends(get_db)):
+async def search(body: SearchIn, request: Request, db: AsyncSession = Depends(get_db, scope="function")):
     results = await search_chunks(
         db,
         query=body.query,

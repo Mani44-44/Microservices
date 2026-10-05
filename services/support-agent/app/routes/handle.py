@@ -20,7 +20,7 @@ router = APIRouter(tags=["handle"])
 
 
 @router.post("/handle", response_model=HandleResponse, summary="Handle one support-agent turn (internal use only)")
-async def handle(body: HandleRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def handle(body: HandleRequest, request: Request, db: AsyncSession = Depends(get_db, scope="function")):
     log.info(
         "handle_request",
         conversation_id=body.conversation_id,

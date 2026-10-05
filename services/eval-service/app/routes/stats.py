@@ -9,7 +9,7 @@ router = APIRouter(tags=["stats"])
 
 
 @router.get("/stats")
-async def get_stats(db: AsyncSession = Depends(get_db)):
+async def get_stats(db: AsyncSession = Depends(get_db, scope="function")):
     total_result = await db.execute(select(func.count(AgentTrace.trace_id)))
     total_traces = total_result.scalar_one()
 

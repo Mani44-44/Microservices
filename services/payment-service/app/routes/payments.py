@@ -61,7 +61,7 @@ async def health():
 async def create_payment_intent(
     body: CreatePaymentIntentRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     correlation_id = _correlation_id(request)
     log.info(
@@ -140,7 +140,7 @@ async def confirm_payment(
     payment_id: uuid.UUID,
     body: ConfirmPaymentRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     correlation_id = _correlation_id(request)
     log.info(
@@ -226,7 +226,7 @@ async def confirm_payment(
 async def receive_webhook(
     body: WebhookPayload,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     x_webhook_signature: str | None = Header(default=None, alias="X-Webhook-Signature"),
 ):
     correlation_id = _correlation_id(request)
@@ -323,7 +323,7 @@ async def refund_payment(
     payment_id: uuid.UUID,
     body: RefundRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     correlation_id = _correlation_id(request)
     log.info(
@@ -422,7 +422,7 @@ async def refund_payment(
 async def get_payment(
     payment_id: uuid.UUID,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     correlation_id = _correlation_id(request)
     result = await db.execute(select(Payment).where(Payment.id == payment_id))

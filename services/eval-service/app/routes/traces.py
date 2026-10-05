@@ -24,7 +24,7 @@ router = APIRouter(tags=["traces"])
 
 
 @router.post("/traces")
-async def create_trace(body: TraceIn, db: AsyncSession = Depends(get_db)):
+async def create_trace(body: TraceIn, db: AsyncSession = Depends(get_db, scope="function")):
     trace_id = body.trace_id or uuid.uuid4()
 
     cost = body.estimated_cost_usd
@@ -53,7 +53,7 @@ async def create_trace(body: TraceIn, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/traces/{trace_id}", response_model=TraceOut)
-async def get_trace(trace_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_trace(trace_id: uuid.UUID, db: AsyncSession = Depends(get_db, scope="function")):
     trace = await db.get(AgentTrace, trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
@@ -64,7 +64,7 @@ async def get_trace(trace_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 async def list_traces(
     agent_type: str | None = None,
     limit: int = 50,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     stmt = select(AgentTrace).order_by(AgentTrace.created_at.desc()).limit(limit)
     if agent_type:

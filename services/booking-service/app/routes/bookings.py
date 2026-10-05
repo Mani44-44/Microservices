@@ -37,7 +37,7 @@ async def lock_seats_endpoint(
     body: LockSeatsRequest,
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     lock_manager: LockManager = Depends(_get_lock_manager),
 ):
     log.info(
@@ -61,7 +61,7 @@ async def confirm_booking_endpoint(
     body: ConfirmBookingRequest,
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     lock_manager: LockManager = Depends(_get_lock_manager),
 ):
     log.info(
@@ -83,7 +83,7 @@ async def release_booking_endpoint(
     booking_id: uuid.UUID,
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     lock_manager: LockManager = Depends(_get_lock_manager),
 ):
     log.info(
@@ -105,7 +105,7 @@ async def cancel_booking_endpoint(
     booking_id: uuid.UUID,
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     log.info(
         "cancel_booking_request",
@@ -126,7 +126,7 @@ async def get_booking_endpoint(
     booking_id: uuid.UUID,
     request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     booking = await svc.get_booking(booking_id, user_id, db)
     return BookingResponse.model_validate(booking)

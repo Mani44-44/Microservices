@@ -40,7 +40,7 @@ def _missing_fields_message(missing: list[str]) -> str:
 
 
 @router.post("/plan", response_model=PlanResponse)
-async def plan(body: PlanRequest, db: AsyncSession = Depends(get_db), llm_client=Depends(get_llm_client)):
+async def plan(body: PlanRequest, db: AsyncSession = Depends(get_db, scope="function"), llm_client=Depends(get_llm_client)):
     settings = get_settings()
 
     result = await db.execute(

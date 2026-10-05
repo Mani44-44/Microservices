@@ -16,7 +16,7 @@ router = APIRouter(prefix="/venues", tags=["venues"])
 
 
 @router.get("/", response_model=list[VenueResponse])
-async def list_venues(db: AsyncSession = Depends(get_db)) -> list[VenueResponse]:
+async def list_venues(db: AsyncSession = Depends(get_db, scope="function")) -> list[VenueResponse]:
     """Return a list of all venues."""
     result = await db.execute(select(Venue).order_by(Venue.name))
     venues = result.scalars().all()
@@ -26,7 +26,7 @@ async def list_venues(db: AsyncSession = Depends(get_db)) -> list[VenueResponse]
 @router.get("/{venue_id}", response_model=VenueDetailResponse)
 async def get_venue(
     venue_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> VenueDetailResponse:
     """Return a single venue with its sections."""
     result = await db.execute(

@@ -34,7 +34,7 @@ def _get_lock_manager(request: Request) -> LockManager:
 async def get_locked_seats_for_event(
     event_id: uuid.UUID,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     lock_manager = _get_lock_manager(request)
     locked_seat_ids = await lock_manager.get_all_locked_seats_for_event(event_id)

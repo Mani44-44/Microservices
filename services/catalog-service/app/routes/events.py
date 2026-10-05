@@ -84,7 +84,7 @@ async def list_events(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
     status: str | None = Query(default="PUBLISHED"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> PaginatedEvents:
     """List events with optional filters, paginated."""
     query = select(Event)
@@ -133,7 +133,7 @@ async def list_events(
 @router.get("/{event_id}", response_model=EventDetailResponse)
 async def get_event(
     event_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> EventDetailResponse:
     """Return a single event with its venue detail."""
     result = await db.execute(
@@ -179,7 +179,7 @@ async def get_event(
 @router.get("/{event_id}/seats", response_model=SeatMapResponse)
 async def get_seat_map(
     event_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> SeatMapResponse:
     """
     Return all seats for an event grouped by section, with per-seat prices
@@ -269,7 +269,7 @@ async def get_seat(
         description="Look up live locked/booked status from booking-service. "
         "Booking-service passes false when it only needs the price.",
     ),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> SeatResponse:
     """Return the status and price for a single seat at an event."""
     # Verify event exists

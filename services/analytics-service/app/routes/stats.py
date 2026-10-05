@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/stats")
-async def get_stats(db: AsyncSession = Depends(get_db)):
+async def get_stats(db: AsyncSession = Depends(get_db, scope="function")):
     result = await db.execute(select(BookingEventCount))
     rows = result.scalars().all()
     return {row.event_type: row.count for row in rows}
