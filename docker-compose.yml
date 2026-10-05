@@ -74,7 +74,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/init-multi-db.sql:/docker-entrypoint-initdb.d/01-init-multi-db.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ticketflow"]
+      # TCP (-h), not the Unix socket: on a fresh volume the image runs its
+      # init scripts on a temporary socket-only server, which a socket probe
+      # reports as ready while app containers still get "connection refused".
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ticketflow"]
       interval: 2s
       timeout: 3s
       retries: 10
@@ -142,7 +145,10 @@ services:
     volumes:
       - rag_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ticketflow"]
+      # TCP (-h), not the Unix socket: on a fresh volume the image runs its
+      # init scripts on a temporary socket-only server, which a socket probe
+      # reports as ready while app containers still get "connection refused".
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ticketflow"]
       interval: 2s
       timeout: 3s
       retries: 10
