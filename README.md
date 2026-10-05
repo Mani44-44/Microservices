@@ -271,7 +271,7 @@ docker compose up -d postgres rag-postgres redis
 
 The 6 agent services run as bare `uvicorn --reload` processes so they can reach the host-run Phase 1 services on `localhost`. Entry point: http://localhost:8007/docs.
 
-> No real LLM/API key is used anywhere in the agent layer — intent classification, constraint extraction, itinerary generation, prompt-injection/PII detection, and hallucination checking are deterministic regex/heuristic Python, documented as such in each service.
+> **LLM is optional.** If `GROQ_API_KEY` is set (Groq's free OpenAI-compatible API, model `openai/gpt-oss-20b`), the agent layer uses it for intent classification, guardrail judging of borderline injections, RAG re-ranking, itinerary text and refund-message wording. Without a key every one of those falls back to deterministic regex/heuristic/template logic and the stack runs normally — refund *amounts and decisions* always come from the deterministic rules engine either way.
 
 ---
 
@@ -398,7 +398,14 @@ pytest services/ --cov=app --cov-report=term-missing
 
 `scripts/loadtest/locustfile.py` models one realistic user journey: register/login → browse catalog → lock + confirm/release a seat → check booking status → occasionally hit the support agent for a refund. Full methodology and numbers: [`docs/load-test-results.md`](docs/load-test-results.md).
 
-A follow-up chaos run killed the Redpanda broker mid-load (`docker stop redpanda` for ~5s, 30 concurrent users): **zero visible request failures** on any booking/auth/agent-chat path — booking-service treats the event publish as fire-and-forget from the caller's perspective, so a broker blip doesn't fail a booking. Full results: [`docs/load-chaos-results.md`](docs/load-chaos-results.md). (Both result sets predate the booking-correctness changes described under [Notes & Known Issues](#notes--known-issues) and have not been re-captured.)
+A follow-up chaos run killed the Redpanda broker mid-load (`docker stop redpanda` for ~5s, 30 concurrent users): **zero visible request failures** on any booking/auth/agent-chat path — booking-service treats the event publish as fire-and-forget from the caller's perspective, so a broker blip doesn't fail a booking. Full results: [`docs/load-chaos-results.md`](docs/load-chaos-results.md). Both were re-run on 2026-10-05 after the booking-correctness fixes: 0 failures at 20, 30 (with broker kill) and 100 users, with the outbox fully drained and every event consumed exactly once.
+
+For a functional check of the booking guarantees against a running stack (double booking blocked, fail-closed pricing, refund cancels the booking, expiry frees seats):
+
+```powershell
+python scripts/e2e_booking_checks.py            # ~30s
+python scripts/e2e_booking_checks.py --expiry   # + waits out a real seat hold (~6 min)
+```
 
 Two standalone chaos scripts are also available for manual exercising:
 

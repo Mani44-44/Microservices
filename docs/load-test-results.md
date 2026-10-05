@@ -1,10 +1,51 @@
 # TicketFlow Gateway — Locust Load Test Results
 
-> **Note (2026-10-05):** these numbers were captured before booking-service started
-> recording sold seats (`seat_reservations`), failing closed on seat pricing, and
-> returning 503 `PAYMENT_STATUS_UNKNOWN` instead of FAILED on payment timeouts.
-> Confirmed seats can no longer be re-locked, so a re-run will show more lock 409s
-> as the seed pool sells out. These results have not been re-captured since.
+## Re-run 2026-10-05 (after the booking-correctness fixes)
+
+Same locustfile and configs, live 21-container docker-compose stack (Docker
+Engine in WSL2 Ubuntu), freshly seeded catalog. Raw CSVs:
+`scripts/loadtest/results_v2_20u_*`, `results_v2_100u_*`.
+
+| | 20 users / 45s | 100 users / 55s |
+|---|---|---|
+| Requests | 925 | 3532 |
+| Unexpected failures | **0** | **0** |
+| `POST /auth/register` avg / max | 245 / 306 ms | 228 / 366 ms |
+| `POST /bookings/lock` p50 / p95 | 5 / 130 ms | 5 / ~110 ms |
+| `POST /bookings/{id}/confirm` p50 | 89 ms | 130 ms |
+
+What changed versus a first run on the same day *before* the last two fixes:
+
+- **`confirm` returned 404 `BOOKING_NOT_FOUND` for a booking whose `lock` had
+  just returned 201** (2 occurrences at 20 users). Cause: every service's
+  `get_db` committed after `yield`, which FastAPI's default dependency scope
+  runs *after the response is sent*. Fixed with `Depends(get_db,
+  scope="function")`; 0 occurrences since.
+- **Registration at 100 users averaged 9,045 ms (max 13,707 ms)** because
+  bcrypt ran inline on user-service's event loop. Moved to a worker thread:
+  **228 ms avg / 366 ms max** (~40x).
+- The events-list task now treats 429 (shared per-IP limit; all simulated
+  users share one IP) as expected, like every other task. It is no longer
+  "known broken" — the trailing-slash redirect bug was fixed earlier.
+- `confirm`'s ~3.1 s tail is the mock provider's deliberate
+  delayed-success scenario (10% of payments), not a regression.
+- A growing share of lock attempts return 409 as the fixed seat pool sells
+  out — sold seats now stay sold.
+
+Post-run data invariants (queried directly in Postgres, after all runs
+including the chaos run): 296 outbox events, 0 unpublished, each processed
+exactly once by notification and analytics; 0 double-sold seats; 0
+confirmed seats without a `seat_reservations` row; 0 bookings stuck PENDING
+past expiry; DLQ empty.
+
+Beyond load: `python scripts/e2e_booking_checks.py --expiry` passes all 14
+live checks (double booking blocked, sold seats shown as booked, fail-closed
+pricing, refund via the support agent cancels the booking and frees the
+seat, events reach analytics, abandoned holds expire after the real 300 s TTL).
+
+---
+
+## Original run (2026-08-30)
 
 Date: 2026-08-30. Target: `http://localhost:8000` (the `gateway` service), plus
 `http://localhost:8007` for the one journey step that the gateway does not

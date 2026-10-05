@@ -1,10 +1,21 @@
 # Load + Chaos Test: Redpanda Broker Kill During Active Load
 
-> **Note (2026-10-05):** these numbers were captured before booking-service started
-> recording sold seats (`seat_reservations`), failing closed on seat pricing, and
-> returning 503 `PAYMENT_STATUS_UNKNOWN` instead of FAILED on payment timeouts.
-> Confirmed seats can no longer be re-locked, so a re-run will show more lock 409s
-> as the seed pool sells out. These results have not been re-captured since.
+## Re-run 2026-10-05 (after the booking-correctness fixes)
+
+Same shape: 30 users, spawn 5/s, 60 s, `redpanda` stopped ~20 s in
+(09:23:54 UTC) and started again at 09:24:00 (~6 s outage). Raw CSVs:
+`scripts/loadtest/results_v2_chaos_*`.
+
+- **1650 requests, 0 failures** on every path (lock, confirm, release,
+  status, auth, agent chat, catalog reads).
+- Recovery verified at the data level, not just the HTTP level: within
+  ~45 s of the restart the outbox had **0 unpublished rows** (296 total) and
+  both notification-service and analytics-service had processed **all 296
+  events exactly once**, with nothing routed to `booking.events.dlq`.
+
+---
+
+## Original run (2026-08-30)
 
 ## What was run
 
