@@ -17,6 +17,7 @@ A production-shaped **microservices event-booking platform**: 13 independently d
 - [Service Catalog](#service-catalog)
 - [Tech Stack](#tech-stack)
 - [Prerequisites](#prerequisites)
+- [Demo](#demo)
 - [Quick Start (Docker Compose)](#quick-start-docker-compose)
 - [Manual Setup (Phase 1 core services)](#manual-setup-phase-1-core-services)
 - [Environment Variables](#environment-variables)
@@ -186,6 +187,19 @@ Infra containers: PostgreSQL (`:5440` app DBs, `:5434` `rag-postgres`), Redis (`
 | Python | 3.12+ | Only needed for manual/non-containerized runs |
 | PostgreSQL | 15+ | Only needed for manual runs (Compose provides it) |
 | Redis | 7+ | Only needed for manual runs (Compose provides it) |
+
+---
+
+## Demo
+
+```powershell
+.\demo.ps1          # start the stack, seed data, open the UI
+.\demo.ps1 -Check   # API + concurrency checks;  -UiTest: browser test;  -Stop: stop
+```
+
+Walkthrough with screenshots: [`docs/DEMO.md`](docs/DEMO.md).
+
+![Seat map](docs/demo/04-seats-held.png)
 
 ---
 
@@ -433,7 +447,7 @@ See [`k8s/README.md`](k8s/README.md) for details and validation status.
 
 ## Browser UI
 
-`ui/index.html` is a static, dependency-free browser client that drives the live stack directly (register/login, browse events, lock/confirm a booking, chat with the agent gateway) — open it directly in a browser once the stack is up, no build step required.
+`ui/index.html` is a static, dependency-free browser client (no build step) that drives the live stack: sign up / sign in (tokens refresh automatically, logout revokes the session), browse events, pick seats on a priced seat map, hold them with a countdown, pay or release, see **My bookings**, request a refund through the AI support agent, and chat with the assistant. Open it directly once the stack is up — `.\demo.ps1` does this for you. `scripts/ui_smoke.py` tests the whole journey in headless Chromium.
 
 ---
 

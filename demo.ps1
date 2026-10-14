@@ -5,7 +5,8 @@
 .EXAMPLE
   .\demo.ps1            # start (or resume) everything and open the UI
   .\demo.ps1 -Stop      # stop the stack (data is kept)
-  .\demo.ps1 -Check     # run the end-to-end checks against the running stack
+  .\demo.ps1 -Check     # end-to-end + concurrency checks against the running stack
+  .\demo.ps1 -UiTest    # browser test of the UI (installs headless Chromium once)
 
   The stack runs in Docker. On Windows without Docker Desktop it uses Docker
   Engine inside WSL (distro "Ubuntu" by default). WSL shuts down when no
@@ -15,16 +16,22 @@
 param(
   [switch]$Stop,
   [switch]$Check,
+  [switch]$UiTest,
+  [switch]$NoBrowser,
   [string]$Distro = "Ubuntu"
 )
-$ErrorActionPreference = "Stop"
+# "Continue", not "Stop": in Windows PowerShell 5.1, "Stop" turns any stderr
+# output from native tools (pip warnings, docker progress) into a fatal error.
+# Failures are detected through $LASTEXITCODE and explicit throws instead.
+$ErrorActionPreference = "Continue"
 $Root = $PSScriptRoot
 
 function Invoke-Compose([string]$composeArgs) {
   if (Get-Command docker -ErrorAction SilentlyContinue) {
     Push-Location $Root; try { cmd /c "docker compose $composeArgs" } finally { Pop-Location }
   } else {
-    $wslRoot = (wsl -d $Distro -- wslpath -a "$Root").Trim()
+    # wsl.exe strips backslashes from arguments, so translate C:\x\y -> /mnt/c/x/y here.
+    $wslRoot = "/mnt/" + $Root.Substring(0, 1).ToLower() + $Root.Substring(2).Replace("\", "/")
     wsl -d $Distro -- bash -c "cd '$wslRoot' && sudo docker compose $composeArgs"
   }
   if ($LASTEXITCODE -ne 0) { throw "docker compose $composeArgs failed" }
@@ -39,12 +46,38 @@ function Wait-Healthy([string]$url, [int]$timeoutSec = 180) {
   throw "Timed out waiting for $url"
 }
 
-function Find-Python {
-  foreach ($c in @("py -3", "python")) {
-    $exe, $rest = $c -split " ", 2
-    if (Get-Command $exe -ErrorAction SilentlyContinue) { return $c }
+function Get-DemoPython {
+  # A private venv (.venv, git-ignored) with scripts\requirements.txt, so
+  # seeding and the checks never depend on the system Python's packages.
+  $venvPy = Join-Path $Root ".venv\Scripts\python.exe"
+  if (-not (Test-Path $venvPy)) {
+    $base = $null
+    foreach ($v in @("3.12", "3.11", "3.13")) {
+      if (Get-Command py -ErrorAction SilentlyContinue) {
+        $found = $false
+        & py "-$v" -c "import sys" 2>$null | Out-Null
+        $found = ($LASTEXITCODE -eq 0)
+        if ($found) { $base = @("py", "-$v"); break }
+      }
+    }
+    if (-not $base) {
+      if (Get-Command python -ErrorAction SilentlyContinue) { $base = @("python") }
+      else { throw "Python 3.11+ is required for seeding and checks" }
+    }
+    Write-Host "Creating .venv with $($base -join ' ') (first run only)..."
+    $exe = $base[0]; $pyArgs = @($base | Select-Object -Skip 1)
+    & $exe @pyArgs -m venv (Join-Path $Root ".venv")
+    if ($LASTEXITCODE -ne 0) { throw "Could not create .venv" }
   }
-  throw "Python 3 is required for seeding / checks"
+  $req = Join-Path $Root "scripts\requirements.txt"
+  $stamp = Join-Path $Root ".venv\.requirements-installed"
+  if (-not (Test-Path $stamp) -or (Get-Item $req).LastWriteTime -gt (Get-Item $stamp).LastWriteTime) {
+    Write-Host "Installing script dependencies into .venv..."
+    & $venvPy -m pip install -q --disable-pip-version-check -r $req
+    if ($LASTEXITCODE -ne 0) { throw "pip install -r scripts\requirements.txt failed" }
+    Set-Content -Path $stamp -Value (Get-Date -Format o)
+  }
+  return $venvPy
 }
 
 if ($Stop) {
@@ -56,10 +89,19 @@ if ($Stop) {
   exit 0
 }
 
-$py = Find-Python
+$py = Get-DemoPython
+$env:PYTHONPATH = $Root
+$env:PYTHONIOENCODING = "utf-8"
 
 if ($Check) {
-  & cmd /c "$py `"$Root\scripts\e2e_booking_checks.py`""
+  & $py (Join-Path $Root "scripts\e2e_booking_checks.py"); $e2e = $LASTEXITCODE
+  & $py (Join-Path $Root "scripts\concurrency_checks.py"); $conc = $LASTEXITCODE
+  exit ($e2e + $conc)
+}
+
+if ($UiTest) {
+  & $py -m playwright install chromium
+  & $py (Join-Path $Root "scripts\ui_smoke.py")
   exit $LASTEXITCODE
 }
 
@@ -83,17 +125,16 @@ foreach ($u in @(
 # Seed the catalog (creates anything missing) and move event dates relative
 # to today, so there are always upcoming, bookable events to demo.
 Write-Host "Seeding / refreshing catalog data..."
-$env:PYTHONPATH = $Root
-& cmd /c "$py `"$Root\scripts\seed_data.py`" --refresh-dates"
-if ($LASTEXITCODE -ne 0) { throw "Seeding failed (pip install -r scriptsequirements.txt?)" }
+& $py (Join-Path $Root "scripts\seed_data.py") --refresh-dates
+if ($LASTEXITCODE -ne 0) { throw "Seeding failed" }
 
 Write-Host ""
 Write-Host "TicketFlow is up:"
-Write-Host "  Browser UI        ui\index.html (opening now)"
+Write-Host "  Browser UI        $(Join-Path $Root 'ui\index.html')"
 Write-Host "  API docs          http://localhost:8000/api/v1/docs"
 Write-Host "  Agent API docs    http://localhost:8007/docs"
 Write-Host "  Grafana           http://localhost:3000   (admin / admin)"
 Write-Host "  Jaeger traces     http://localhost:16686"
 Write-Host "  Redpanda console  http://localhost:8080"
 Write-Host "Walkthrough: docs\DEMO.md.  Stop with: .\demo.ps1 -Stop"
-Start-Process (Join-Path $Root "ui\index.html")
+if (-not $NoBrowser) { Start-Process (Join-Path $Root "ui\index.html") }
