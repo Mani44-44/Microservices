@@ -97,6 +97,8 @@ async def test_redteam_string_blocked_by_real_guardrail_if_reachable(text):
         )
         resp.raise_for_status()
         body = resp.json()
-        if text in KNOWN_GUARDRAIL_GAPS:
-            pytest.xfail("Known gap: real guardrail's risk_score for this string is below its block threshold")
+        # Only an *actual* miss is the known gap: with GROQ_API_KEY set, the
+        # guardrail's LLM judge blocks these too, and that should count.
+        if text in KNOWN_GUARDRAIL_GAPS and not body["blocked"]:
+            pytest.xfail("Known gap: heuristic risk_score is below the block threshold (no LLM judge)")
         assert body["blocked"] is True, f"Expected '{text}' to be blocked, got: {body}"

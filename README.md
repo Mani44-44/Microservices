@@ -271,7 +271,7 @@ docker compose up -d postgres rag-postgres redis
 
 The 6 agent services run as bare `uvicorn --reload` processes so they can reach the host-run Phase 1 services on `localhost`. Entry point: http://localhost:8007/docs.
 
-> **LLM is optional.** If `GROQ_API_KEY` is set (Groq's free OpenAI-compatible API, model `openai/gpt-oss-20b`), the agent layer uses it for intent classification, guardrail judging of borderline injections, RAG re-ranking, itinerary text and refund-message wording. Without a key every one of those falls back to deterministic regex/heuristic/template logic and the stack runs normally — refund *amounts and decisions* always come from the deterministic rules engine either way.
+> **LLM is optional.** If `GROQ_API_KEY` is set (Groq's free OpenAI-compatible API, model `openai/gpt-oss-20b`), the agent layer uses it for intent classification, guardrail judging of borderline injections, RAG re-ranking, itinerary text and refund-message wording. Without a key every one of those falls back to deterministic regex/heuristic/template logic and the stack runs normally — refund *amounts and decisions* always come from the deterministic rules engine either way. Note: Groq's free tier allows ~8,000 tokens/minute for this model; beyond that calls return 429 and the services fall back to the deterministic path for that request, so under real traffic a paid tier is needed for consistent LLM output. With a key set, the guardrail's LLM judge also blocks the two red-team phrasings the heuristic alone misses.
 
 ---
 
