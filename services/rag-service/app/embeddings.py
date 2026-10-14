@@ -40,6 +40,45 @@ _STOPWORDS = frozenset(
 )
 
 
+# Ticketing/travel vocabulary folded onto the words the policy and travel
+# docs use, so common paraphrases share features. Keep entries domain-safe:
+# an over-broad mapping (e.g. bring -> carry) makes unrelated questions
+# ("can I bring food?") match the wrong doc instead of returning nothing.
+_PHRASES = {
+    "money back": "refund",
+    "called off": "cancel",
+    "back out": "cancel",
+    "new york": "nyc",
+}
+_CANONICAL = {
+    # refunds
+    "reimburse": "refund", "reimbursed": "refund", "reimbursement": "refund",
+    "repay": "refund", "repayment": "refund", "compensation": "refund",
+    # cancellations
+    "canceled": "cancel", "cancelled": "cancel", "canceling": "cancel",
+    "cancelling": "cancel", "cancellation": "cancel", "cancellations": "cancel",
+    # events
+    "concert": "event", "concerts": "event", "gig": "event", "gigs": "event",
+    "show": "event", "shows": "event", "performance": "event", "game": "event",
+    "games": "event", "match": "event", "playoff": "championship", "playoffs": "championship",
+    # tickets and transfers
+    "seat": "ticket", "seats": "ticket", "give": "transfer", "send": "transfer", "gift": "transfer",
+    "cost": "fee", "price": "fee", "charge": "fee",
+    "card": "payment", "credit": "payment",
+    # packing
+    "luggage": "pack", "suitcase": "pack", "baggage": "pack", "bag": "pack", "bags": "pack",
+    "gadget": "charger", "gadgets": "charger", "electronics": "charger", "device": "charger",
+    # travel
+    "abroad": "international", "overseas": "international", "internationally": "international",
+    "trip": "travel", "flight": "travel", "journey": "travel",
+    "rain": "monsoon", "rainy": "monsoon", "rainfall": "monsoon", "autumn": "fall",
+    "nyc": "york", "party": "group",
+    "american": "us", "americans": "us", "usa": "us", "british": "uk",
+    "france": "schengen", "italy": "schengen", "germany": "schengen", "spain": "schengen",
+    "greece": "schengen", "netherlands": "schengen", "europe": "schengen", "european": "schengen",
+}
+
+
 def _stem(token: str) -> str:
     """Tiny suffix stripper so 'refunds'/'refunded'/'refunding' share a feature."""
     for suffix in ("ing", "ed", "es", "s"):
@@ -49,11 +88,15 @@ def _stem(token: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    return [
-        _stem(tok)
-        for tok in _TOKEN_RE.findall(text.lower())
-        if tok not in _STOPWORDS and len(tok) > 1
-    ]
+    text = text.lower()
+    for phrase, canonical in _PHRASES.items():
+        text = text.replace(phrase, canonical)
+    tokens = []
+    for tok in _TOKEN_RE.findall(text):
+        if tok in _STOPWORDS or len(tok) < 2 and tok not in _CANONICAL:
+            continue
+        tokens.append(_stem(_CANONICAL.get(tok, tok)))
+    return tokens
 
 
 def _bucket(feature: str) -> tuple[int, float]:

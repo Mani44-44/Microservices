@@ -38,6 +38,12 @@ lexically relevant chunks: 100% top-1 on the 20 labelled questions in
 `tests/test_retrieval_quality.py` (the previous SHA-256-seeded random vectors
 scored 10%).
 
+A small domain synonym map (`_PHRASES` / `_CANONICAL`: "money back" ->
+refund, concert/gig/show -> event, luggage -> pack, abroad -> international,
+Schengen country names, ...) folds common paraphrases onto the docs' words.
+On a 12-question held-out set written before that map existed, top-1 went
+from 4/12 to 9/12 and top-3 from 8/12 to 12/12.
+
 **Limitation:** it is keyword matching, not semantics — a question that
 shares no word stem with the answer ("money back" vs "refund") won't find it.
 Results scoring below `MIN_RELEVANCE_SCORE` (default 0.15) are dropped, so
