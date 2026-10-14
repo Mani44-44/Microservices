@@ -14,15 +14,37 @@ from libs.llm.groq_client import FakeGroqClient, ToolCallResult
 settings = get_settings()
 
 
+def _test_database_url(database: str) -> str:
+    return (
+        f"postgresql+asyncpg://{settings.postgres_user}:{settings.postgres_password}"
+        f"@{settings.postgres_host}:{settings.postgres_port}/{database}"
+    )
+
+
+async def _ensure_test_database() -> str:
+    """These tests commit rows, so they always run in a dedicated `<db>_test`
+    database (created on demand), never the service's own knowledge base."""
+    name = settings.postgres_db if settings.postgres_db.endswith("_test") else f"{settings.postgres_db}_test"
+    admin = create_async_engine(_test_database_url("postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            exists = (
+                await conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": name})
+            ).scalar()
+            if not exists:
+                await conn.execute(text(f'CREATE DATABASE "{name}"'))
+    finally:
+        await admin.dispose()
+    return name
+
+
 @pytest_asyncio.fixture()
 async def pg_session():
-    engine = create_async_engine(settings.database_url)
     try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        database = await _ensure_test_database()
     except Exception:
-        await engine.dispose()
         pytest.skip("No live Postgres+pgvector connection available")
+    engine = create_async_engine(_test_database_url(database))
 
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
@@ -117,3 +139,10 @@ async def test_reembed_if_stale_rewrites_vectors_from_an_older_embedder(pg_sessi
     chunk = (await pg_session.execute(select(DocumentChunk).limit(1))).scalar_one()
     assert max(abs(a - b) for a, b in zip(chunk.embedding, embed_text(chunk.content))) < 1e-6
     assert await reembed_if_stale(pg_session) == 0
+
+
+async def test_integration_tests_never_touch_the_service_database(pg_session):
+    """These tests commit rows; pointed at the live DB they once leaked test
+    documents into the production knowledge base."""
+    current = (await pg_session.execute(text("SELECT current_database()"))).scalar_one()
+    assert current.endswith("_test"), current
