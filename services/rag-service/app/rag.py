@@ -139,19 +139,19 @@ async def rerank_chunks(llm_client: Any, query: str, candidates: list[dict], top
 
 
 async def reembed_if_stale(db: AsyncSession) -> int:
-    """Re-embed every stored chunk if the stored vectors were produced by a
-    different embed_text() than the current one (e.g. after an embedder
-    upgrade). Checks one chunk; if it matches, does nothing. Returns the
-    number of chunks re-embedded. Caller commits."""
-    sample = (await db.execute(select(DocumentChunk).limit(1))).scalar_one_or_none()
-    if sample is None:
-        return 0
-    current = embed_text(sample.content)
-    if max(abs(a - b) for a, b in zip(sample.embedding, current)) < 1e-6:
-        return 0
+    """Re-embed stored chunks whose vectors don't match the current
+    embed_text() (e.g. after an embedder or synonym-map change).
 
+    Every chunk is checked: a change may only alter chunks containing
+    certain words, so sampling one chunk can miss the stale ones. Returns
+    the number of chunks re-embedded. Caller commits."""
     chunks = (await db.execute(select(DocumentChunk))).scalars().all()
+    reembedded = 0
     for chunk in chunks:
-        chunk.embedding = embed_text(chunk.content)
-    await db.flush()
-    return len(chunks)
+        current = embed_text(chunk.content)
+        if max(abs(a - b) for a, b in zip(chunk.embedding, current)) >= 1e-6:
+            chunk.embedding = current
+            reembedded += 1
+    if reembedded:
+        await db.flush()
+    return reembedded

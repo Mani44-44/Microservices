@@ -146,3 +146,32 @@ async def test_integration_tests_never_touch_the_service_database(pg_session):
     documents into the production knowledge base."""
     current = (await pg_session.execute(text("SELECT current_database()"))).scalar_one()
     assert current.endswith("_test"), current
+
+
+async def test_reembed_if_stale_catches_stale_chunks_even_when_some_are_fresh(pg_session):
+    """An embedder change only alters chunks containing affected words, so
+    checking a single sample chunk can wrongly conclude nothing is stale."""
+    from sqlalchemy import select
+
+    from app.embeddings import _fallback_vector, embed_text
+    from app.models import DocumentChunk
+    from app.rag import reembed_if_stale
+
+    # Start from an empty (test-only) table so the sampled chunk is one of ours.
+    await pg_session.execute(text("DELETE FROM document_chunks"))
+    await pg_session.execute(text("DELETE FROM documents"))
+    await pg_session.commit()
+    for content in ("Seats can be moved.", "Gigs sell out.", "Luggage tips."):
+        await ingest_document(pg_session, content=content, category="support", source="t")
+    await pg_session.commit()
+    sample = (await pg_session.execute(select(DocumentChunk).limit(1))).scalar_one()
+    for chunk in (await pg_session.execute(select(DocumentChunk))).scalars():
+        if chunk.id != sample.id:
+            chunk.embedding = _fallback_vector(chunk.content)  # stale
+    await pg_session.commit()
+
+    await reembed_if_stale(pg_session)
+    await pg_session.commit()
+
+    for chunk in (await pg_session.execute(select(DocumentChunk))).scalars():
+        assert max(abs(a - b) for a, b in zip(chunk.embedding, embed_text(chunk.content))) < 1e-6, chunk.content
