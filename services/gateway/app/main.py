@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse, Response
 
 from app.config import get_settings
 from app.middleware.rate_limit import RateLimiter
-from app.routes import auth, bookings, events
+from app.routes import auth, bookings, events, users
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -124,6 +124,7 @@ async def correlation_logging_middleware(request: Request, call_next):
 app.include_router(auth.router)
 app.include_router(events.router)
 app.include_router(bookings.router)
+app.include_router(users.router)
 
 
 # ---------------------------------------------------------------------------

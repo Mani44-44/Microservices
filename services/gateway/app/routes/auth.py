@@ -136,3 +136,32 @@ async def refresh(request: Request) -> Response:
         request.app.state.http_client,
         extra_headers={"X-Correlation-ID": correlation_id},
     )
+
+
+@router.post("/logout")
+async def logout(request: Request) -> Response:
+    """
+    Proxy POST /api/v1/auth/logout -> User Service /logout.
+    Revokes the supplied refresh token. Subject to per-IP rate limit only.
+    """
+    rate_limiter = request.app.state.rate_limiter
+    client_ip = request.client.host if request.client else "unknown"
+
+    allowed, count = await rate_limiter.check_ip_limit(client_ip)
+    if not allowed:
+        log.warning(
+            "ip_rate_limited",
+            path="/api/v1/auth/logout",
+            client_ip=client_ip,
+            count=count,
+        )
+        return _rate_limited_response()
+
+    target = f"{settings.user_service_url}/logout"
+    correlation_id = getattr(request.state, "correlation_id", "")
+    return await proxy_request(
+        request,
+        target,
+        request.app.state.http_client,
+        extra_headers={"X-Correlation-ID": correlation_id},
+    )

@@ -73,6 +73,31 @@ def _common_headers(user_id: str, correlation_id: str) -> dict:
     }
 
 
+@router.get("")
+async def list_my_bookings(request: Request) -> Response:
+    """
+    GET /api/v1/bookings  ->  Booking Service /users/{user_id}/bookings
+
+    The caller's booking history (paginated: ?page=&size=). The user id is
+    taken from the verified token, so a client can only list its own.
+    """
+    token = get_bearer_token(request)
+    user_id = extract_user_id_from_token(token)
+
+    limited = await _enforce_limits(request, user_id)
+    if limited:
+        return limited
+
+    correlation_id = getattr(request.state, "correlation_id", "")
+    target = f"{settings.booking_service_url}/users/{user_id}/bookings"
+    return await proxy_request(
+        request,
+        target,
+        request.app.state.http_client,
+        extra_headers=_common_headers(user_id, correlation_id),
+    )
+
+
 @router.post("/lock")
 async def lock_booking(request: Request) -> Response:
     """

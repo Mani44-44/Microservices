@@ -422,3 +422,84 @@ async def test_get_booking_proxied(client_with_mocks):
     )
     assert resp.status_code == 200
     assert resp.json()["id"] == booking_id
+
+
+# ===========================================================================
+# Account + booking-history routes used by the browser UI
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_logout_proxied_to_user_service(client_with_mocks):
+    """POST /api/v1/auth/logout revokes the refresh token at the User Service."""
+    ac, mock_router = client_with_mocks
+    s = _test_settings()
+    route = mock_router.post(f"{s.user_service_url}/logout").mock(
+        return_value=HttpxResponse(200, json={"message": "Logged out"})
+    )
+
+    resp = await ac.post("/api/v1/auth/logout", json={"refresh_token": "rt-123"})
+
+    assert resp.status_code == 200
+    assert route.called
+    assert json.loads(route.calls.last.request.content) == {"refresh_token": "rt-123"}
+
+
+@pytest.mark.asyncio
+async def test_get_and_update_profile_proxied(client_with_mocks):
+    ac, mock_router = client_with_mocks
+    s = _test_settings()
+    profile = {"id": TEST_USER_ID, "email": "a@b.c", "full_name": "A"}
+    get_route = mock_router.get(f"{s.user_service_url}/me").mock(return_value=HttpxResponse(200, json=profile))
+    patch_route = mock_router.patch(f"{s.user_service_url}/me").mock(
+        return_value=HttpxResponse(200, json={**profile, "full_name": "B"})
+    )
+    headers = {"Authorization": f"Bearer {make_valid_token()}"}
+
+    got = await ac.get("/api/v1/users/me", headers=headers)
+    updated = await ac.patch("/api/v1/users/me", json={"full_name": "B"}, headers=headers)
+
+    assert got.status_code == 200 and got.json()["email"] == "a@b.c"
+    assert updated.status_code == 200 and updated.json()["full_name"] == "B"
+    # The user's own bearer token is forwarded so user-service can authenticate it.
+    assert get_route.calls.last.request.headers["authorization"].startswith("Bearer ")
+    assert patch_route.called
+
+
+@pytest.mark.asyncio
+async def test_profile_requires_token(client_with_mocks):
+    ac, _ = client_with_mocks
+    resp = await ac.get("/api/v1/users/me")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_my_bookings_uses_user_id_from_token(client_with_mocks):
+    """GET /api/v1/bookings lists the caller's own bookings; the user id comes
+    from the verified token, never from the request."""
+    ac, mock_router = client_with_mocks
+    s = _test_settings()
+    route = mock_router.get(f"{s.booking_service_url}/users/{TEST_USER_ID}/bookings").mock(
+        return_value=HttpxResponse(200, json={"items": [], "total": 0, "page": 2, "size": 5})
+    )
+
+    resp = await ac.get(
+        "/api/v1/bookings",
+        params={"page": 2, "size": 5},
+        headers={"Authorization": f"Bearer {make_valid_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert route.called
+    assert route.calls.last.request.url.params["page"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_cancel_of_confirmed_booking_is_not_exposed(client_with_mocks):
+    """Cancelling a CONFIRMED booking must go through the refund flow (support
+    agent), so the gateway must not route it."""
+    ac, _ = client_with_mocks
+    resp = await ac.post(
+        f"/api/v1/bookings/{uuid.uuid4()}/cancel",
+        headers={"Authorization": f"Bearer {make_valid_token()}"},
+    )
+    assert resp.status_code in (404, 405)

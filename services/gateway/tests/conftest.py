@@ -62,12 +62,14 @@ def override_settings():
     import app.routes.auth as auth_mod
     import app.routes.events as events_mod
     import app.routes.bookings as bookings_mod
+    import app.routes.users as users_mod
     import app.middleware.auth as auth_mw
 
     s = _test_settings()
     auth_mod.settings = s
     events_mod.settings = s
     bookings_mod.settings = s
+    users_mod.settings = s
     auth_mw.settings = s
     yield
 
