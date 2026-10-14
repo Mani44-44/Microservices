@@ -4,11 +4,14 @@ seed_data.py
 Idempotent seed script for the TicketFlow catalog database.
 
 Usage (from the repo root):
-    python scripts/seed_data.py
+    python scripts/seed_data.py                    # create anything missing
+    python scripts/seed_data.py --refresh-dates    # also move existing events
+                                                   # onto the relative schedule
 
 It will:
   1. Create 2 venues with sections and seats.
-  2. Create 5 events (4 published, 1 draft).
+  2. Create 5 events (4 published, 1 draft), dated relative to today
+     (see EVENT_SCHEDULE) so the demo always has upcoming events.
   3. Create EventSeatPrice rows for every seat at every published event.
 
 Running the script a second time is safe – existing records are detected
@@ -21,7 +24,7 @@ import math
 import string
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -39,6 +42,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 DATABASE_URL = (
     "postgresql+asyncpg://ticketflow:ticketflow123@localhost:5440/ticketflow_catalog"
 )
+
+# Event dates are relative to "now" so the demo always has bookable events:
+# (days from today, hour UTC). One event is deliberately in the past to show
+# that finished events can't be booked; Taylor Swift sits inside the 7-day
+# partial-refund window, the others in the full-refund window.
+EVENT_SCHEDULE = {
+    "Taylor Swift - Eras Tour": (3, 20),
+    "Coldplay Live": (30, 20),
+    "NY Knicks vs Lakers": (-5, 19),
+    "Hamilton Musical": (12, 19),
+    "Upcoming Concert": (90, 21),
+}
+
+
+def _at(offset: tuple[int, int]) -> datetime:
+    days, hour = offset
+    day = datetime.now(timezone.utc).replace(hour=hour, minute=0, second=0, microsecond=0)
+    return day + timedelta(days=days)
+
 
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -185,8 +207,15 @@ async def seed() -> None:
         # ------------------------------------------------------------------ #
 
         existing_events = (await db.execute(select(Event))).scalars().all()
-        if existing_events:
-            print(f"[SKIP] Found {len(existing_events)} existing event(s) – skipping event creation.")
+        if existing_events and REFRESH_DATES:
+            for ev in existing_events:
+                if ev.title in EVENT_SCHEDULE:
+                    ev.event_date = _at(EVENT_SCHEDULE[ev.title])
+                    print(f"  ~ {ev.title}: {ev.event_date:%Y-%m-%d %H:%M} UTC")
+            await db.commit()
+            print("[OK] Event dates moved onto the relative demo schedule.")
+        elif existing_events:
+            print(f"[SKIP] Found {len(existing_events)} existing event(s) – skipping event creation (use --refresh-dates to move them).")
         else:
             print("Creating events …")
 
@@ -204,7 +233,7 @@ async def seed() -> None:
                     event_type="concert",
                     status="PUBLISHED",
                     base_price=Decimal("150.00"),
-                    event_date=datetime(2026, 10, 15, 20, 0, 0, tzinfo=timezone.utc),
+                    event_date=_at(EVENT_SCHEDULE["Taylor Swift - Eras Tour"]),
                     venue_id=msa_id,
                     description="The record-breaking Eras Tour comes to NYC.",
                 ),
@@ -213,7 +242,7 @@ async def seed() -> None:
                     event_type="concert",
                     status="PUBLISHED",
                     base_price=Decimal("120.00"),
-                    event_date=datetime(2026, 11, 20, 20, 0, 0, tzinfo=timezone.utc),
+                    event_date=_at(EVENT_SCHEDULE["Coldplay Live"]),
                     venue_id=msa_id,
                     description="Coldplay's Music of the Spheres World Tour.",
                 ),
@@ -222,7 +251,7 @@ async def seed() -> None:
                     event_type="sports",
                     status="PUBLISHED",
                     base_price=Decimal("200.00"),
-                    event_date=datetime(2026, 9, 30, 19, 30, 0, tzinfo=timezone.utc),
+                    event_date=_at(EVENT_SCHEDULE["NY Knicks vs Lakers"]),
                     venue_id=msa_id,
                     description="Regular season NBA game.",
                 ),
@@ -231,7 +260,7 @@ async def seed() -> None:
                     event_type="theater",
                     status="PUBLISHED",
                     base_price=Decimal("180.00"),
-                    event_date=datetime(2026, 10, 5, 19, 0, 0, tzinfo=timezone.utc),
+                    event_date=_at(EVENT_SCHEDULE["Hamilton Musical"]),
                     venue_id=orpheum_id,
                     description="The Tony Award-winning musical by Lin-Manuel Miranda.",
                 ),
@@ -240,7 +269,7 @@ async def seed() -> None:
                     event_type="concert",
                     status="DRAFT",
                     base_price=Decimal("100.00"),
-                    event_date=datetime(2027, 1, 1, 21, 0, 0, tzinfo=timezone.utc),
+                    event_date=_at(EVENT_SCHEDULE["Upcoming Concert"]),
                     venue_id=msa_id,
                     description="Details coming soon.",
                 ),
@@ -297,6 +326,8 @@ async def seed() -> None:
     print("Seed complete!")
     await engine.dispose()
 
+
+REFRESH_DATES = "--refresh-dates" in sys.argv
 
 if __name__ == "__main__":
     asyncio.run(seed())
