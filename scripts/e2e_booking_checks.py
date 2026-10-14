@@ -155,6 +155,19 @@ def main() -> int:
     if resp.status_code == 201:
         http.post(f"{GATEWAY}/api/v1/bookings/{resp.json()['id']}/release", headers=bob["headers"])
 
+    past = [
+        e for e in events.values()
+        if datetime.fromisoformat(e["event_date"].replace("Z", "+00:00")).astimezone(timezone.utc) <= datetime.now(timezone.utc)
+    ]
+    if past:
+        past_seat = next(iter(seat_map(bob, past[0]["id"])))
+        resp = lock(bob, past[0]["id"], [past_seat])
+        check(
+            "an event that already happened can't be booked (EVENT_NOT_BOOKABLE)",
+            resp.status_code == 422 and error_code(resp) == "EVENT_NOT_BOOKABLE",
+            f"{resp.status_code} {resp.text[:200]}",
+        )
+
     # 3. Standard error envelope from user-service (through the gateway).
     resp = http.post(f"{GATEWAY}/api/v1/auth/login", json={"email": alice["email"], "password": "wrong-password"})
     check(

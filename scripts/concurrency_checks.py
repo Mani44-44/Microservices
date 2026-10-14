@@ -18,6 +18,7 @@ import os
 import sys
 import uuid
 from collections import Counter
+from datetime import datetime, timezone
 
 import httpx
 
@@ -44,7 +45,9 @@ async def register(c: httpx.AsyncClient) -> dict:
 
 async def available_seat(c: httpx.AsyncClient, headers: dict) -> tuple[str, str]:
     events = (await c.get(f"{GATEWAY}/api/v1/events/", params={"size": 50}, headers=headers)).json()["items"]
-    for ev in events:
+    now = datetime.now(timezone.utc)
+    upcoming = [e for e in events if datetime.fromisoformat(e["event_date"].replace("Z", "+00:00")) > now]
+    for ev in upcoming:
         seats = (await c.get(f"{GATEWAY}/api/v1/events/{ev['id']}/seats", headers=headers)).json()
         for sec in seats["sections"]:
             for s in sec["seats"]:

@@ -1,0 +1,10 @@
+# Dependencies for the host-side scripts in scripts/ (seed_data.py,
+# e2e_booking_checks.py, concurrency_checks.py, ui_smoke.py).
+#   pip install -r scripts/requirements.txt
+#   python -m playwright install chromium     # only for ui_smoke.py
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.30.0
+pydantic-settings>=2.7.0
+structlog>=24.4.0
+httpx>=0.28.0
+playwright>=1.48.0

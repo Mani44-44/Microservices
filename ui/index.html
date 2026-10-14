@@ -2,294 +2,531 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TicketFlow</title>
 <style>
-  :root { color-scheme: light; }
-  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; background: #f7f7f9; }
-  h1 { margin-bottom: 4px; }
-  .sub { color: #666; margin-top: 0; }
-  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-  h2 { margin-top: 0; font-size: 16px; }
-  label { display: block; font-size: 13px; color: #444; margin: 8px 0 2px; }
-  input, textarea, select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
-  button { margin-top: 10px; padding: 7px 14px; border: none; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; font-size: 14px; }
-  button:hover { background: #1d4ed8; }
-  button.secondary { background: #6b7280; }
-  button.danger { background: #dc2626; }
-  .row { display: flex; gap: 8px; }
-  .row > * { flex: 1; }
-  pre { background: #111; color: #7ee787; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 220px; }
-  .event { border: 1px solid #eee; border-radius: 6px; padding: 8px; margin-bottom: 6px; cursor: pointer; }
-  .event:hover { background: #f0f4ff; }
-  .seat { display: inline-block; padding: 4px 8px; margin: 2px; border-radius: 4px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; }
-  .seat.available { background: #ecfdf5; border-color: #10b981; }
-  .seat.selected { background: #10b981; color: #fff; }
-  .seat.locked, .seat.booked { background: #f3f4f6; color: #999; cursor: not-allowed; }
-  .status { font-size: 13px; padding: 2px 8px; border-radius: 10px; display: inline-block; }
-  .status.ok { background: #d1fae5; color: #065f46; }
-  .status.err { background: #fee2e2; color: #991b1b; }
-  .chat-log { max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
-  .msg { margin: 6px 0; padding: 6px 10px; border-radius: 6px; max-width: 80%; }
-  .msg.user { background: #2563eb; color: #fff; margin-left: auto; }
-  .msg.bot { background: #f3f4f6; }
-  .msg.blocked { background: #fee2e2; color: #991b1b; }
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --ink: #1f2430; --muted: #6b7280; --line: #e3e5ea;
+    --brand: #2f5bea; --brand-ink: #ffffff; --ok: #0f7b4b; --ok-bg: #e3f5ec; --warn: #9a5b00; --warn-bg: #fff3dc;
+    --err: #b42318; --err-bg: #fde8e7; --seat: #e9f7ef; --seat-line: #3fa66a; --seat-sel: #2f5bea;
+    --seat-off: #eceef2; --seat-booked: #f6e0df;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .who { margin-left: auto; color: var(--muted); display: flex; align-items: center; gap: 10px; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; color: var(--ink); border: 0; padding: 7px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.active { background: var(--brand); color: var(--brand-ink); }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  button.btn { padding: 8px 14px; border: 0; border-radius: 6px; background: var(--brand); color: var(--brand-ink); cursor: pointer; font: inherit; }
+  button.btn.secondary { background: #e7e9ee; color: var(--ink); }
+  button.btn.danger { background: var(--err); }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .muted { color: var(--muted); }
+  .hidden { display: none !important; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .b-CONFIRMED, .b-ok { background: var(--ok-bg); color: var(--ok); }
+  .b-PENDING { background: var(--warn-bg); color: var(--warn); }
+  .b-CANCELLED, .b-EXPIRED, .b-FAILED { background: var(--err-bg); color: var(--err); }
+  .events { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+  .event { border: 1px solid var(--line); border-radius: 10px; padding: 14px; cursor: pointer; background: var(--panel); }
+  .event:hover { border-color: var(--brand); }
+  .event h3 { margin: 0 0 6px; font-size: 15px; }
+  .event.past { opacity: .55; cursor: not-allowed; }
+  .event.past:hover { border-color: var(--line); }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin: 6px 0 12px; }
+  .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -2px; border: 1px solid var(--line); }
+  .lg-a::before { background: var(--seat); border-color: var(--seat-line) !important; }
+  .lg-s::before { background: var(--seat-sel); }
+  .lg-l::before { background: var(--seat-off); }
+  .lg-b::before { background: var(--seat-booked); }
+  .section-name { margin: 12px 0 6px; font-weight: 600; }
+  .section-name small { font-weight: 400; color: var(--muted); }
+  .seatrow { display: flex; gap: 4px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
+  .seatrow .rowlabel { width: 24px; color: var(--muted); font-size: 12px; }
+  .seat { width: 30px; height: 26px; border-radius: 5px; border: 1px solid var(--seat-line); background: var(--seat); color: #1d4d33; font-size: 11px; font-weight: 600; cursor: pointer; padding: 0; }
+  .seat.sel { background: var(--seat-sel); color: #fff; border-color: var(--seat-sel); }
+  .seat.locked { background: var(--seat-off); border-color: var(--line); color: #aaa; cursor: not-allowed; }
+  .seat.booked { background: var(--seat-booked); border-color: var(--line); color: #b9a3a1; cursor: not-allowed; }
+  .summary { position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 12px 0 0; margin-top: 12px; }
+  .hold { font-variant-numeric: tabular-nums; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
   code { font-size: 12px; }
+  .chat-log { height: 340px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfbfc; margin-bottom: 10px; }
+  .msg { margin: 6px 0; padding: 8px 12px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
+  .msg.user { background: var(--brand); color: #fff; margin-left: auto; }
+  .msg.bot { background: #eef0f4; }
+  .msg.blocked { background: var(--err-bg); color: var(--err); }
+  .msg small { display: block; opacity: .7; margin-top: 4px; font-size: 11px; }
+  .suggest { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .suggest button { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+  #toast { position: fixed; right: 20px; top: 70px; max-width: 380px; padding: 10px 14px; border-radius: 8px; color: #fff; background: #1f2430; box-shadow: 0 6px 20px rgba(0,0,0,.15); z-index: 10; }
+  #toast.err { background: var(--err); }
+  #toast.ok { background: var(--ok); }
+  details summary { cursor: pointer; color: var(--muted); }
+  pre { background: #12151c; color: #b8f2c9; padding: 10px; border-radius: 8px; max-height: 240px; overflow: auto; font-size: 12px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 
-<h1>TicketFlow</h1>
-<p class="sub">Live UI against the real local stack — gateway :8000, agent-gateway :8007.</p>
+<header>
+  <h1>TicketFlow</h1>
+  <nav id="nav" class="hidden">
+    <button data-view="events" class="active">Events</button>
+    <button data-view="bookings">My bookings</button>
+    <button data-view="chat">Assistant</button>
+  </nav>
+  <div class="who">
+    <span id="who-name"></span>
+    <button class="btn secondary hidden" id="logout-btn">Log out</button>
+  </div>
+</header>
 
-<section id="auth-section">
-  <h2>1. Account</h2>
-  <div id="auth-status"></div>
-  <div class="row">
-    <div>
-      <label>Email</label>
-      <input id="email" value="">
+<main>
+  <!-- Sign in / register -->
+  <section id="view-auth" class="panel" style="max-width: 460px; margin: 40px auto;">
+    <h2>Sign in or create an account</h2>
+    <label for="email">Email</label>
+    <input id="email" autocomplete="email">
+    <label for="password">Password (min 8 characters)</label>
+    <input id="password" type="password" value="DemoPass123!" autocomplete="current-password">
+    <label for="fullname">Full name (new accounts only)</label>
+    <input id="fullname" value="Demo User">
+    <div class="row" style="margin-top: 14px;">
+      <button class="btn" id="login-btn">Sign in</button>
+      <button class="btn secondary" id="register-btn">Create account</button>
     </div>
-    <div>
-      <label>Password</label>
-      <input id="password" type="password" value="TestPass123!">
+    <p class="muted" style="margin-bottom:0">Runs against the local stack: API gateway <code>:8000</code>, agent gateway <code>:8007</code>.</p>
+  </section>
+
+  <!-- Events + seat map -->
+  <section id="view-events" class="hidden">
+    <div class="panel">
+      <h2>Upcoming events</h2>
+      <div id="events" class="events"></div>
     </div>
-    <div>
-      <label>Full name (register only)</label>
-      <input id="fullname" value="Demo User">
+    <div id="seat-panel" class="panel hidden">
+      <div class="row">
+        <h2 id="event-title" style="margin:0"></h2>
+        <span class="muted" id="event-when"></span>
+        <button class="btn secondary" id="refresh-seats" style="margin-left:auto">Refresh seats</button>
+      </div>
+      <div class="legend">
+        <span class="lg-a">Available</span><span class="lg-s">Selected</span><span class="lg-l">Held by someone</span><span class="lg-b">Sold</span>
+      </div>
+      <div id="seatmap"></div>
+      <div class="summary">
+        <div class="row" id="select-bar">
+          <span id="sel-summary" class="muted">Pick up to 10 seats.</span>
+          <button class="btn" id="lock-btn" style="margin-left:auto" disabled>Hold seats</button>
+        </div>
+        <div class="row hidden" id="hold-bar">
+          <span>Held <span id="hold-seats"></span> · total <strong id="hold-total"></strong> · expires in <span class="hold" id="hold-timer"></span></span>
+          <button class="btn danger" id="release-btn" style="margin-left:auto">Release</button>
+          <button class="btn" id="confirm-btn">Pay &amp; confirm</button>
+        </div>
+      </div>
     </div>
-  </div>
-  <button onclick="register()">Register</button>
-  <button class="secondary" onclick="login()">Login</button>
-  <button class="secondary" onclick="logout()">Logout</button>
-</section>
+  </section>
 
-<section id="events-section" style="display:none">
-  <h2>2. Browse events</h2>
-  <button onclick="loadEvents()">Load events</button>
-  <div id="events-list"></div>
-</section>
+  <!-- My bookings -->
+  <section id="view-bookings" class="panel hidden">
+    <div class="row"><h2 style="margin:0">My bookings</h2><button class="btn secondary" id="reload-bookings" style="margin-left:auto">Reload</button></div>
+    <table>
+      <thead><tr><th>Event</th><th>Seats</th><th>Total</th><th>Status</th><th>Booked</th><th></th></tr></thead>
+      <tbody id="bookings-body"></tbody>
+    </table>
+    <p id="no-bookings" class="muted hidden">No bookings yet — pick an event to get started.</p>
+  </section>
 
-<section id="seats-section" style="display:none">
-  <h2>3. Pick seats — <span id="selected-event-title"></span></h2>
-  <div id="seat-map"></div>
-  <div class="row">
-    <button onclick="lockSeats()">Lock selected seats</button>
-  </div>
-</section>
+  <!-- Assistant -->
+  <section id="view-chat" class="panel hidden">
+    <h2>Assistant</h2>
+    <p class="muted" style="margin-top:-6px">Trip planning, booking questions, refunds and policy Q&amp;A. Messages are screened by the guardrail service.</p>
+    <div class="suggest" id="suggest"></div>
+    <div class="chat-log" id="chat-log"></div>
+    <div class="row">
+      <input id="chat-input" placeholder="Ask anything…" style="flex:1">
+      <button class="btn" id="chat-send">Send</button>
+      <button class="btn secondary" id="chat-new">New chat</button>
+    </div>
+  </section>
 
-<section id="booking-section" style="display:none">
-  <h2>4. Confirm / release</h2>
-  <div id="booking-info"></div>
-  <div class="row">
-    <button onclick="confirmBooking()">Confirm (pay)</button>
-    <button class="danger" onclick="releaseBooking()">Release</button>
-  </div>
-</section>
+  <details class="panel"><summary>API log</summary><pre id="log"></pre></details>
+</main>
 
-<section id="chat-section" style="display:none">
-  <h2>5. AI agent chat</h2>
-  <div class="chat-log" id="chat-log"></div>
-  <div class="row">
-    <input id="chat-input" placeholder="e.g. plan me a 3 day trip to Tokyo" onkeydown="if(event.key==='Enter')sendChat()">
-    <button onclick="sendChat()">Send</button>
-  </div>
-</section>
-
-<section>
-  <h2>Raw log</h2>
-  <pre id="log">Ready.</pre>
-</section>
+<div id="toast" class="hidden"></div>
 
 <script>
+"use strict";
 const GATEWAY = "http://localhost:8000";
 const AGENT_GATEWAY = "http://localhost:8007";
+const MAX_SEATS = 10;
 
-let token = localStorage.getItem("tf_token") || null;
-let conversationId = null;
-let currentEvent = null;
-let selectedSeats = new Set();
-let currentBookingId = null;
+const state = {
+  access: localStorage.getItem("tf_access"),
+  refresh: localStorage.getItem("tf_refresh"),
+  events: [],
+  event: null,
+  seatsById: {},
+  selected: new Set(),
+  hold: null,          // booking response while seats are held
+  holdTimer: null,
+  conversationId: null,
+};
 
-function log(obj) {
-  const el = document.getElementById("log");
-  const text = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
-  el.textContent = text + "\n\n" + el.textContent;
-}
-
-function setAuthStatus(msg, ok) {
-  document.getElementById("auth-status").innerHTML =
-    `<span class="status ${ok ? 'ok' : 'err'}">${msg}</span>`;
-}
-
-function showAuthedSections(show) {
-  for (const id of ["events-section", "chat-section"]) {
-    document.getElementById(id).style.display = show ? "block" : "none";
+// ---------- small helpers (all text goes through textContent: no HTML injection) ----------
+const $ = (id) => document.getElementById(id);
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") node.className = v;
+    else if (k === "on") for (const [ev, fn] of Object.entries(v)) node.addEventListener(ev, fn);
+    else if (k === "text") node.textContent = v;
+    else node.setAttribute(k, v);
   }
+  for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return node;
+}
+function money(v, cur = "USD") {
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: cur }).format(Number(v));
+}
+function when(iso) { return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); }
+function toast(msg, kind = "") {
+  const t = $("toast");
+  t.textContent = msg; t.className = kind; clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.add("hidden"), 4500);
+}
+function log(entry) {
+  const pre = $("log");
+  pre.textContent = JSON.stringify(entry, null, 2) + "\n\n" + pre.textContent.slice(0, 20000);
+}
+
+// ---------- API with automatic token refresh ----------
+class ApiError extends Error {
+  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+}
+
+async function rawCall(url, opts) {
+  const headers = { ...(opts.headers || {}) };
+  if (state.access) headers.Authorization = "Bearer " + state.access;
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(url, { ...opts, headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
+  let data = null;
+  try { data = await res.json(); } catch { /* empty body */ }
+  log({ method: opts.method || "GET", url, status: res.status, data });
+  return { res, data };
 }
 
 async function api(url, opts = {}) {
-  opts.headers = opts.headers || {};
-  if (token) opts.headers["Authorization"] = "Bearer " + token;
-  if (opts.body) opts.headers["Content-Type"] = "application/json";
-  const res = await fetch(url, opts);
-  let data;
-  try { data = await res.json(); } catch { data = null; }
-  log({ url, status: res.status, data });
-  if (!res.ok) throw new Error((data && data.error && data.error.message) || res.statusText);
+  let { res, data } = await rawCall(url, opts);
+  if (res.status === 401 && state.refresh && !opts._retried && await refreshTokens()) {
+    ({ res, data } = await rawCall(url, { ...opts, _retried: true }));
+  }
+  if (!res.ok) {
+    const err = (data && data.error) || {};
+    throw new ApiError(res.status, err.code || "HTTP_" + res.status, err.message || res.statusText);
+  }
   return data;
 }
 
-async function register() {
-  const email = document.getElementById("email").value;
-  const password = document.getElementById("password").value;
-  const full_name = document.getElementById("fullname").value;
+async function refreshTokens() {
   try {
-    const data = await api(`${GATEWAY}/api/v1/auth/register`, {
-      method: "POST",
-      body: JSON.stringify({ email, password, full_name }),
+    const res = await fetch(`${GATEWAY}/api/v1/auth/refresh`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: state.refresh }),
     });
-    token = data.access_token;
-    localStorage.setItem("tf_token", token);
-    setAuthStatus("Registered + logged in as " + email, true);
-    showAuthedSections(true);
-  } catch (e) {
-    setAuthStatus("Register failed: " + e.message, false);
+    if (!res.ok) throw new Error("refresh failed");
+    saveTokens(await res.json());
+    return true;
+  } catch {
+    signOutLocally("Your session expired — please sign in again.");
+    return false;
   }
 }
 
-async function login() {
-  const email = document.getElementById("email").value;
-  const password = document.getElementById("password").value;
+function saveTokens(t) {
+  state.access = t.access_token; state.refresh = t.refresh_token;
+  localStorage.setItem("tf_access", state.access);
+  localStorage.setItem("tf_refresh", state.refresh);
+}
+
+// ---------- auth ----------
+async function authenticate(kind) {
+  const email = $("email").value.trim(), password = $("password").value, full_name = $("fullname").value.trim();
+  const body = kind === "register" ? { email, password, full_name } : { email, password };
   try {
-    const data = await api(`${GATEWAY}/api/v1/auth/login`, {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    });
-    token = data.access_token;
-    localStorage.setItem("tf_token", token);
-    setAuthStatus("Logged in as " + email, true);
-    showAuthedSections(true);
+    state.access = null;
+    saveTokens(await api(`${GATEWAY}/api/v1/auth/${kind}`, { method: "POST", body }));
+    await enterApp();
   } catch (e) {
-    setAuthStatus("Login failed: " + e.message, false);
+    toast(e.message, "err");
   }
 }
 
-function logout() {
-  token = null;
-  localStorage.removeItem("tf_token");
-  setAuthStatus("Logged out", false);
-  showAuthedSections(false);
+async function logout() {
+  const refresh_token = state.refresh;
+  if (refresh_token) {
+    try { await api(`${GATEWAY}/api/v1/auth/logout`, { method: "POST", body: { refresh_token } }); } catch { /* still sign out */ }
+  }
+  signOutLocally("Signed out.");
 }
 
+function signOutLocally(msg) {
+  stopHoldTimer();
+  state.access = state.refresh = null; state.hold = null; state.conversationId = null;
+  localStorage.removeItem("tf_access"); localStorage.removeItem("tf_refresh");
+  $("nav").classList.add("hidden"); $("logout-btn").classList.add("hidden"); $("who-name").textContent = "";
+  for (const v of ["events", "bookings", "chat"]) $("view-" + v).classList.add("hidden");
+  $("view-auth").classList.remove("hidden");
+  $("chat-log").replaceChildren();
+  if (msg) toast(msg);
+}
+
+async function enterApp() {
+  const me = await api(`${GATEWAY}/api/v1/users/me`);
+  $("who-name").textContent = `${me.full_name || ""} · ${me.email}`;
+  $("view-auth").classList.add("hidden");
+  $("nav").classList.remove("hidden"); $("logout-btn").classList.remove("hidden");
+  show("events");
+  await loadEvents();
+}
+
+// ---------- navigation ----------
+function show(view) {
+  for (const v of ["events", "bookings", "chat"]) $("view-" + v).classList.toggle("hidden", v !== view);
+  for (const b of $("nav").querySelectorAll("button")) b.classList.toggle("active", b.dataset.view === view);
+  if (view === "bookings") loadBookings();
+  if (view === "chat") $("chat-input").focus();
+}
+
+// ---------- events + seat map ----------
 async function loadEvents() {
-  const data = await api(`${GATEWAY}/api/v1/events/`);
-  const listEl = document.getElementById("events-list");
-  listEl.innerHTML = "";
+  const data = await api(`${GATEWAY}/api/v1/events/?size=50`);
+  // Upcoming first; events that already happened go last (shown greyed out).
+  const now = Date.now();
+  data.items.sort((a, b) => ((new Date(a.event_date) <= now) - (new Date(b.event_date) <= now)) || a.event_date.localeCompare(b.event_date));
+  state.events = data.items;
+  const box = $("events"); box.replaceChildren();
   for (const ev of data.items) {
-    const div = document.createElement("div");
-    div.className = "event";
-    div.innerHTML = `<strong>${ev.title}</strong> — ${new Date(ev.event_date).toLocaleString()} <span class="status ok">${ev.status}</span>`;
-    div.onclick = () => selectEvent(ev);
-    listEl.appendChild(div);
+    const over = new Date(ev.event_date) <= new Date();
+    box.append(el("div", {
+        class: over ? "event past" : "event", "data-event-id": ev.id,
+        on: { click: () => over ? toast("This event has already taken place.", "err") : openEvent(ev) },
+      },
+      el("h3", { text: ev.title }),
+      el("div", { class: "muted", text: when(ev.event_date) }),
+      el("div", { text: `${ev.event_type || "event"} · from ${money(ev.base_price || 0, ev.currency)}` }),
+      over ? el("span", { class: "badge b-EXPIRED", text: "Event over" }) : "",
+    ));
   }
 }
 
-async function selectEvent(ev) {
-  currentEvent = ev;
-  selectedSeats.clear();
-  document.getElementById("selected-event-title").textContent = ev.title;
-  document.getElementById("seats-section").style.display = "block";
-  const data = await api(`${GATEWAY}/api/v1/events/${ev.id}/seats`);
-  const mapEl = document.getElementById("seat-map");
-  mapEl.innerHTML = "";
+async function openEvent(ev) {
+  if (state.hold && state.hold.event_id !== ev.id) { toast("Release or confirm your current hold first.", "err"); return; }
+  state.event = ev;
+  $("event-title").textContent = ev.title;
+  $("event-when").textContent = when(ev.event_date);
+  $("seat-panel").classList.remove("hidden");
+  await loadSeats();
+  $("seat-panel").scrollIntoView({ behavior: "smooth" });
+}
+
+async function loadSeats() {
+  const data = await api(`${GATEWAY}/api/v1/events/${state.event.id}/seats`);
+  state.seatsById = {};
+  const map = $("seatmap"); map.replaceChildren();
   for (const section of data.sections) {
-    const h = document.createElement("div");
-    h.innerHTML = `<strong>${section.section_name}</strong>`;
-    mapEl.appendChild(h);
-    for (const seat of section.seats) {
-      const s = document.createElement("span");
-      s.className = "seat " + (seat.status === "available" ? "available" : seat.status);
-      s.textContent = seat.seat_number;
-      s.title = `$${seat.price}`;
-      if (seat.status === "available") {
-        s.onclick = () => {
-          if (selectedSeats.has(seat.id)) { selectedSeats.delete(seat.id); s.classList.remove("selected"); }
-          else { selectedSeats.add(seat.id); s.classList.add("selected"); }
-        };
+    const prices = section.seats.map((s) => Number(s.price));
+    map.append(el("div", { class: "section-name" }, section.section_name + " ",
+      el("small", { text: prices.length ? `from ${money(Math.min(...prices))}` : "" })));
+    const rows = {};
+    for (const seat of section.seats) (rows[seat.row_number || "-"] ||= []).push(seat);
+    for (const [row, seats] of Object.entries(rows).sort()) {
+      const line = el("div", { class: "seatrow" }, el("span", { class: "rowlabel", text: row }));
+      seats.sort((a, b) => Number(a.seat_number) - Number(b.seat_number));
+      for (const seat of seats) {
+        state.seatsById[seat.id] = seat;
+        const held = state.hold && state.hold.seats.some((s) => s.seat_id === seat.id);
+        const cls = held || state.selected.has(seat.id) ? "seat sel" : seat.status === "available" ? "seat" : "seat " + seat.status;
+        const btn = el("button", {
+          class: cls, text: seat.seat_number, "data-seat-id": seat.id,
+          title: `${section.section_name} row ${row} seat ${seat.seat_number} · ${money(seat.price)} · ${seat.status}`,
+        });
+        if (seat.status === "available" && !state.hold) btn.addEventListener("click", () => toggleSeat(seat.id, btn));
+        else btn.disabled = !held;
+        line.append(btn);
       }
-      mapEl.appendChild(s);
+      map.append(line);
     }
   }
+  updateSelectionBar();
 }
 
-async function lockSeats() {
-  if (!currentEvent || selectedSeats.size === 0) { alert("Pick at least one seat first"); return; }
+function toggleSeat(id, btn) {
+  if (state.selected.has(id)) state.selected.delete(id);
+  else if (state.selected.size >= MAX_SEATS) { toast(`At most ${MAX_SEATS} seats per booking.`, "err"); return; }
+  else state.selected.add(id);
+  btn.classList.toggle("sel", state.selected.has(id));
+  updateSelectionBar();
+}
+
+function updateSelectionBar() {
+  const seats = [...state.selected].map((id) => state.seatsById[id]).filter(Boolean);
+  const total = seats.reduce((sum, s) => sum + Number(s.price), 0);
+  $("sel-summary").textContent = seats.length
+    ? `${seats.length} seat(s) selected · ${money(total)}`
+    : "Pick up to 10 seats.";
+  $("lock-btn").disabled = seats.length === 0;
+  $("select-bar").classList.toggle("hidden", !!state.hold);
+  $("hold-bar").classList.toggle("hidden", !state.hold);
+}
+
+async function holdSeats() {
+  $("lock-btn").disabled = true;
   try {
-    const data = await api(`${GATEWAY}/api/v1/bookings/lock`, {
-      method: "POST",
-      body: JSON.stringify({ event_id: currentEvent.id, seat_ids: [...selectedSeats] }),
+    state.hold = await api(`${GATEWAY}/api/v1/bookings/lock`, {
+      method: "POST", body: { event_id: state.event.id, seat_ids: [...state.selected] },
     });
-    currentBookingId = data.id;
-    document.getElementById("booking-section").style.display = "block";
-    document.getElementById("booking-info").innerHTML =
-      `<span class="status ok">Locked</span> booking <code>${data.id}</code> — total $${data.total_amount} ${data.currency}, status <strong>${data.status}</strong>`;
+    state.selected.clear();
+    $("hold-seats").textContent = `${state.hold.seats.length} seat(s)`;
+    $("hold-total").textContent = money(state.hold.total_amount, state.hold.currency);
+    startHoldTimer(state.hold.expires_at);
+    toast("Seats held — complete payment before the timer runs out.", "ok");
   } catch (e) {
-    alert("Lock failed: " + e.message);
+    toast(e.code === "SEAT_ALREADY_LOCKED" ? "Someone else just grabbed one of those seats." :
+          e.code === "SEAT_ALREADY_BOOKED" ? "One of those seats has already been sold." :
+          e.code === "EVENT_NOT_BOOKABLE" ? "This event is no longer on sale." : e.message, "err");
   }
+  await loadSeats();
 }
 
-async function confirmBooking() {
-  if (!currentBookingId) return;
+function startHoldTimer(expiresAt) {
+  stopHoldTimer();
+  const end = new Date(expiresAt).getTime();
+  const tick = () => {
+    const left = Math.max(0, Math.round((end - Date.now()) / 1000));
+    $("hold-timer").textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    if (left === 0) { stopHoldTimer(); state.hold = null; toast("Your hold expired and the seats were released.", "err"); loadSeats(); }
+  };
+  tick(); state.holdTimer = setInterval(tick, 1000);
+}
+function stopHoldTimer() { clearInterval(state.holdTimer); state.holdTimer = null; }
+
+async function confirmHold() {
+  const btn = $("confirm-btn"); btn.disabled = true; btn.textContent = "Processing payment…";
   try {
-    const data = await api(`${GATEWAY}/api/v1/bookings/${currentBookingId}/confirm`, {
-      method: "POST",
-      body: JSON.stringify({ payment_method: "card_test_4242" }),
+    const booking = await api(`${GATEWAY}/api/v1/bookings/${state.hold.id}/confirm`, {
+      method: "POST", body: { payment_method: "tok_visa" },
     });
-    document.getElementById("booking-info").innerHTML =
-      `<span class="status ok">Confirmed</span> booking <code>${data.id}</code> status <strong>${data.status}</strong>`;
+    if (booking.status === "CONFIRMED") toast(`Booked! ${money(booking.total_amount, booking.currency)} charged.`, "ok");
+    else toast(`Payment declined — booking ${booking.status.toLowerCase()}. The seats were released.`, "err");
+    stopHoldTimer(); state.hold = null;
   } catch (e) {
-    alert("Confirm failed: " + e.message);
+    if (e.code === "PAYMENT_STATUS_UNKNOWN") toast("We couldn't confirm your payment yet. It's safe to press Pay again — you won't be charged twice.", "err");
+    else { toast(e.message, "err"); stopHoldTimer(); state.hold = null; }
+  } finally {
+    btn.disabled = false; btn.textContent = "Pay & confirm";
+  }
+  await loadSeats();
+}
+
+async function releaseHold() {
+  try { await api(`${GATEWAY}/api/v1/bookings/${state.hold.id}/release`, { method: "POST" }); toast("Seats released."); }
+  catch (e) { toast(e.message, "err"); }
+  stopHoldTimer(); state.hold = null;
+  await loadSeats();
+}
+
+// ---------- my bookings ----------
+async function loadBookings() {
+  const data = await api(`${GATEWAY}/api/v1/bookings?size=50`);
+  const titles = Object.fromEntries(state.events.map((e) => [e.id, e.title]));
+  const body = $("bookings-body"); body.replaceChildren();
+  $("no-bookings").classList.toggle("hidden", data.items.length > 0);
+  for (const b of data.items) {
+    const actions = el("td");
+    if (b.status === "CONFIRMED") {
+      actions.append(el("button", { class: "btn secondary", text: "Request refund", "data-refund": b.id,
+        on: { click: () => askAssistant(`I want a refund for booking ${b.id}`) } }));
+    }
+    body.append(el("tr", { "data-booking-id": b.id },
+      el("td", {}, titles[b.event_id] || "Event", el("br"), el("code", { class: "muted", text: b.id.slice(0, 8) })),
+      el("td", { text: String(b.seats.length) }),
+      el("td", { text: money(b.total_amount, b.currency) }),
+      el("td", {}, el("span", { class: `badge b-${b.status}`, text: b.status })),
+      el("td", { class: "muted", text: when(b.created_at) }),
+      actions,
+    ));
   }
 }
 
-async function releaseBooking() {
-  if (!currentBookingId) return;
-  try {
-    await api(`${GATEWAY}/api/v1/bookings/${currentBookingId}/release`, { method: "POST" });
-    document.getElementById("booking-info").innerHTML = `<span class="status err">Released</span>`;
-    currentBookingId = null;
-  } catch (e) {
-    alert("Release failed: " + e.message);
-  }
+// ---------- assistant ----------
+const SUGGESTIONS = [
+  "What is your refund policy?",
+  "Plan a 3 day trip to Tokyo",
+  "Can I transfer my ticket to a friend?",
+  "I want to talk to a human",
+];
+
+function addMessage(kind, text, meta) {
+  const log = $("chat-log");
+  const msg = el("div", { class: "msg " + kind, text });
+  if (meta) msg.append(el("small", { text: meta }));
+  log.append(msg); log.scrollTop = log.scrollHeight;
 }
 
-async function sendChat() {
-  const input = document.getElementById("chat-input");
-  const message = input.value.trim();
+async function sendChat(text) {
+  const input = $("chat-input");
+  const message = (text ?? input.value).trim();
   if (!message) return;
-  const logEl = document.getElementById("chat-log");
-  logEl.innerHTML += `<div class="msg user">${message}</div>`;
   input.value = "";
+  addMessage("user", message);
+  $("chat-send").disabled = true;
   try {
     const data = await api(`${AGENT_GATEWAY}/api/v1/agent/chat`, {
-      method: "POST",
-      body: JSON.stringify({ message, conversation_id: conversationId }),
+      method: "POST", body: { message, conversation_id: state.conversationId },
     });
-    conversationId = data.conversation_id;
-    const cls = data.blocked ? "blocked" : "bot";
-    logEl.innerHTML += `<div class="msg ${cls}">${data.response}<br><small>intent: ${data.intent}${data.blocked ? " · BLOCKED: " + data.reasons.join(", ") : ""}</small></div>`;
+    state.conversationId = data.conversation_id;
+    if (data.blocked) addMessage("blocked", data.response, "Blocked by guardrail: " + (data.reasons || []).join(", "));
+    else addMessage("bot", data.response, "intent: " + data.intent);
   } catch (e) {
-    logEl.innerHTML += `<div class="msg blocked">Error: ${e.message}</div>`;
+    addMessage("blocked", e.message, e.code);
+  } finally {
+    $("chat-send").disabled = false;
   }
-  logEl.scrollTop = logEl.scrollHeight;
 }
 
-// Restore session on load
-if (token) {
-  setAuthStatus("Restored session from previous login", true);
-  showAuthedSections(true);
-}
-document.getElementById("email").value = "demo_" + Date.now() + "@example.com";
+function askAssistant(message) { show("chat"); sendChat(message); }
+
+// ---------- wiring ----------
+$("login-btn").addEventListener("click", () => authenticate("login"));
+$("register-btn").addEventListener("click", () => authenticate("register"));
+$("logout-btn").addEventListener("click", logout);
+for (const b of $("nav").querySelectorAll("button")) b.addEventListener("click", () => show(b.dataset.view));
+$("refresh-seats").addEventListener("click", loadSeats);
+$("lock-btn").addEventListener("click", holdSeats);
+$("confirm-btn").addEventListener("click", confirmHold);
+$("release-btn").addEventListener("click", releaseHold);
+$("reload-bookings").addEventListener("click", loadBookings);
+$("chat-send").addEventListener("click", () => sendChat());
+$("chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+$("chat-new").addEventListener("click", () => { state.conversationId = null; $("chat-log").replaceChildren(); });
+for (const s of SUGGESTIONS) $("suggest").append(el("button", { text: s, on: { click: () => sendChat(s) } }));
+$("email").value = `demo_${Date.now()}@example.com`;
+
+if (state.access) enterApp().catch(() => signOutLocally());
 </script>
 </body>
 </html>
