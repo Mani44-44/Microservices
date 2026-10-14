@@ -80,3 +80,29 @@ async def test_classify_llm_falls_back_on_invalid_intent_from_model():
     )
     result = await classify_llm(fake, "Plan a trip to Paris")
     assert result["intent"] == "TRAVEL_PLANNING"  # regex fallback
+
+
+# Questions *about* a policy are general Q&A (answered from the policy docs);
+# a request about the user's own booking/money is still a refund/booking ask.
+POLICY_CASES = [
+    ("What is your refund policy?", "GENERAL_QA"),
+    ("How do refunds work?", "GENERAL_QA"),
+    ("What's the cancellation policy for group bookings?", "GENERAL_QA"),
+    ("Are refunds allowed within 24 hours of an event?", "GENERAL_QA"),
+    ("What are the rules for cancelling tickets?", "GENERAL_QA"),
+    # Personal asks keep their specific intent.
+    ("How do I get my money back?", "REFUND_REQUEST"),
+    ("I want a refund, what's your policy?", "REFUND_REQUEST"),
+    ("Refund booking 3fa85f64-5717-4562-b3fc-2c963f66afa6 per your refund policy", "REFUND_REQUEST"),
+    ("Cancel my booking please, what's the policy?", "BOOKING_INQUIRY"),
+    ("What is the refund policy? I need a human", "ESCALATION"),
+    # Inflected forms are still refund requests.
+    ("Can I get my tickets refunded?", "REFUND_REQUEST"),
+    ("I'd like refunds for both of my bookings", "REFUND_REQUEST"),
+    ("Please refund me", "REFUND_REQUEST"),
+]
+
+
+@pytest.mark.parametrize("message,expected", POLICY_CASES)
+def test_policy_questions_are_general_qa(message, expected):
+    assert classify(message)["intent"] == expected

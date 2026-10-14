@@ -34,7 +34,7 @@ _ESCALATION_PATTERNS = [
     r"\bhuman\b", r"\bagent\b", r"\brepresentative\b", r"\breal person\b", r"\bspeak to someone\b",
 ]
 _REFUND_PATTERNS = [
-    r"\brefund\b", r"\bmoney back\b", r"\breimburse", r"\bcharge ?back\b",
+    r"\brefund(?:s|ed|ing)?\b", r"\bmoney back\b", r"\breimburse", r"\bcharge ?back\b",
 ]
 _BOOKING_PATTERNS = [
     r"\bmy booking\b", r"\bbooking status\b", r"\bcancel my\b", r"\bmodify my booking\b",
@@ -47,6 +47,19 @@ _TRAVEL_PATTERNS = [
 _CHITCHAT_PATTERNS = [
     r"\bhello\b", r"\bhi\b", r"\bhey\b", r"\bthanks\b", r"\bthank you\b", r"\bgood morning\b",
     r"\bgood evening\b",
+]
+
+
+# A question *about* a policy ("what is your refund policy?") is answered
+# from the policy docs (GENERAL_QA), unless the user is also asking about
+# their own booking/money -- that stays a refund/booking request.
+_POLICY_QUESTION_PATTERNS = [
+    r"\bpolic(?:y|ies)\b", r"\bhow do(?:es)? (?:refunds?|cancell?ations?|transfers?) work\b",
+    r"\bare refunds\b", r"\brules? for\b", r"\bterms and conditions\b",
+]
+_PERSONAL_ASK_PATTERNS = [
+    r"\bmy\b", r"\bme\b", r"\bmine\b", r"\bi (?:want|need|would like)\b", r"\bi'd like\b",
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
 ]
 
 
@@ -70,8 +83,16 @@ def classify(message: str) -> dict:
         ("TRAVEL_PLANNING", _TRAVEL_PATTERNS),
         ("CHITCHAT", _CHITCHAT_PATTERNS),
     ]
+    policy_question = _matches(_POLICY_QUESTION_PATTERNS, text_lower)
+    personal_ask = _matches(_PERSONAL_ASK_PATTERNS, text_lower)
     for intent, patterns in checks:
         matched = _matches(patterns, text_lower)
+        if matched and intent != "ESCALATION" and policy_question and not personal_ask:
+            return {
+                "intent": "GENERAL_QA",
+                "confidence": 0.8,
+                "reasoning": f"Policy question (matched {policy_question}), not a request about the user's own booking.",
+            }
         if matched:
             return {
                 "intent": intent,
