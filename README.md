@@ -405,6 +405,7 @@ For a functional check of the booking guarantees against a running stack (double
 ```powershell
 python scripts/e2e_booking_checks.py            # ~30s
 python scripts/e2e_booking_checks.py --expiry   # + waits out a real seat hold (~6 min)
+python scripts/concurrency_checks.py            # parallel lock/confirm/charge races, real Postgres row locks
 ```
 
 Two standalone chaos scripts are also available for manual exercising:
@@ -487,9 +488,9 @@ Each service follows roughly the same internal shape: `app/{main,config,database
 
 - `PYTHONPATH` must include the repo root for inter-service shared imports (`start_all.ps1` / `start_phase3.ps1` handle this automatically).
 - Seat locks use Redis key pattern `seat_lock:{event_id}:{seat_id}` with a configurable TTL. Locks only cover the hold before payment; a sold seat is recorded in booking-service's `seat_reservations` table, whose `UNIQUE(event_id, seat_id)` constraint is what guarantees a seat is never sold twice (seats are reserved *before* the card is charged). Expiry and TTL extension only ever touch locks still owned by the booking's user.
-- **Payment outcome unknown:** if booking-service can't learn whether a charge succeeded (payment-service timeout and status read-back both fail), the booking stays PENDING and confirm returns 503 `PAYMENT_STATUS_UNKNOWN`; a retry reuses the idempotent payment intent. If the user never retries, the expiry job expires the booking and flags the `BOOKING_EXPIRED` event with `payment_status_unknown: true` — there is no automatic reconciliation job yet, so such events need manual follow-up.
+- **Payment outcome unknown:** if booking-service can't learn whether a charge succeeded, the booking stays PENDING and confirm returns 503 `PAYMENT_STATUS_UNKNOWN`; a retry reuses the idempotent payment intent. Every expiry pass (30s) also reconciles such bookings with payment-service: paid -> CONFIRMED (even after the hold expired, if the seats are still free), paid but seats sold meanwhile -> refunded in full, declined -> FAILED. Failed refund calls are retried on the next pass.
 - **Refunds** cancel the booking first (seats go back on sale), then refund. If the refund call fails after the cancel, the support agent escalates to a human with the booking already cancelled.
-- The payment confirm/refund row locks (`SELECT ... FOR UPDATE`) are not exercised by the SQLite-based test suite; they rely on PostgreSQL semantics.
+- The payment confirm/refund row locks (`SELECT ... FOR UPDATE`) aren't exercised by the SQLite unit tests; `scripts/concurrency_checks.py` verifies them against a running stack (10 parallel confirms of one payment intent charge exactly once; the code before the lock charged 10 times).
 - The guardrail checks in agent-gateway **fail open** by design: if guardrail-service is down, input is not blocked and output is not redacted (logged loudly as `guardrail_*_check_failed`).
 - No Alembic migrations exist yet; tables are created with `create_all` at startup, which creates new tables (e.g. `seat_reservations`) on existing databases but never alters existing ones.
 - The event backbone (Redpanda + notification/analytics consumers) is **idempotent by design**: a `processed_events` table keyed by event id protects against double-processing, and a failing handler retries 3x before routing to `booking.events.dlq` instead of blocking the partition.

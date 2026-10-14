@@ -1,5 +1,25 @@
 # TicketFlow Gateway — Locust Load Test Results
 
+## Regression run 2026-10-14 (after payment reconciliation, intent and RAG changes)
+
+Same configs; raw CSVs `scripts/loadtest/results_v3_*`.
+
+| | 20 users / 45s | 100 users / 55s |
+|---|---|---|
+| Requests | 872 | 3510 |
+| Unexpected failures | **0** | **0** |
+| `POST /auth/register` avg | 289 ms | 222 ms |
+| `POST /bookings/lock` median | 6 ms | 6 ms |
+
+Also on the live stack: `e2e_booking_checks.py --expiry` 14/14,
+`concurrency_checks.py` 3/3 (20-way seat race -> one winner; 10 parallel
+confirms -> one charge). Data invariants afterwards: 495 outbox events, all
+published and consumed exactly once by both consumers; 0 double-sold seats;
+0 bookings stuck PENDING; 0 unresolved (UNKNOWN / REFUND_PENDING) payment
+attempts; DLQ empty.
+
+---
+
 ## Re-run 2026-10-05 (after the booking-correctness fixes)
 
 Same locustfile and configs, live 21-container docker-compose stack (Docker
