@@ -212,8 +212,16 @@ async def test_confirm_renewal_failure_persists_expired(
 # ---------------------------------------------------------------------------
 
 
-def _catalog_client(get_side_effect) -> AsyncMock:
-    return _payment_client(get=get_side_effect)
+_BOOKABLE_EVENT = {
+    "status": "PUBLISHED",
+    "event_date": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+}
+
+
+def _catalog_client(get_side_effect, event=None) -> AsyncMock:
+    """Catalog mock: first GET is the event lookup, then one per seat price."""
+    first = event if isinstance(event, Exception) else _resp(200, event or _BOOKABLE_EVENT)
+    return _payment_client(get=[first, *get_side_effect])
 
 
 @pytest.mark.real_pricing
@@ -465,3 +473,55 @@ async def test_backfill_reserves_seats_of_previously_confirmed_bookings(
         resp = await _lock(committing_client, uuid.uuid4(), event_id, [seat])
         assert resp.status_code == 409
         assert resp.json()["error"]["code"] == "SEAT_ALREADY_BOOKED"
+
+
+# ---------------------------------------------------------------------------
+# Only PUBLISHED events that haven't started can be booked
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.real_pricing
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"status": "PUBLISHED", "event_date": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()},
+        {"status": "DRAFT", "event_date": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()},
+        {"status": "CANCELLED", "event_date": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()},
+    ],
+    ids=["already-started", "draft", "cancelled"],
+)
+async def test_lock_rejects_event_that_is_not_bookable(client, fake_redis, event):
+    event_id = uuid.uuid4()
+    catalog = _catalog_client([_resp(200, {"price": "10.00"})], event=event)
+    with patch("app.booking_service.httpx.AsyncClient", return_value=catalog):
+        resp = await _lock(client, uuid.uuid4(), event_id)
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "EVENT_NOT_BOOKABLE"
+    assert [k async for k in fake_redis.scan_iter(f"seat_lock:{event_id}:*")] == []
+
+
+@pytest.mark.real_pricing
+async def test_lock_rejects_unknown_event(client):
+    catalog = _payment_client(get=[_resp(404, {"error": {"code": "EVENT_NOT_FOUND"}})])
+    with patch("app.booking_service.httpx.AsyncClient", return_value=catalog):
+        resp = await _lock(client, uuid.uuid4())
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "EVENT_NOT_FOUND"
+
+
+@pytest.mark.real_pricing
+async def test_event_not_bookable_is_reported_before_seat_already_sold(client):
+    """For a finished event, 'event is over' is the meaningful answer even if
+    the requested seat was sold back when the event was upcoming."""
+    event_id, seat_id, owner = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    with patch("app.booking_service._fetch_seat_prices", AsyncMock(return_value={seat_id: 50})):
+        lock = await _lock(client, owner, event_id, [seat_id])
+        await _confirm(client, lock.json()["id"], owner, _successful_payment())
+
+    past = {"status": "PUBLISHED", "event_date": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}
+    with patch("app.booking_service.httpx.AsyncClient", return_value=_catalog_client([], event=past)):
+        resp = await _lock(client, uuid.uuid4(), event_id, [seat_id])
+
+    assert resp.json()["error"]["code"] == "EVENT_NOT_BOOKABLE"

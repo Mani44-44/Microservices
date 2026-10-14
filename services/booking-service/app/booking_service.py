@@ -115,12 +115,47 @@ async def _get_seat_price(
     )
 
 
+async def _check_event_bookable(http_client: httpx.AsyncClient, event_id: uuid.UUID) -> None:
+    """Only PUBLISHED events that haven't started yet can be booked."""
+    try:
+        resp = await http_client.get(f"{settings.catalog_service_url}/events/{event_id}", timeout=5.0)
+    except httpx.HTTPError as exc:
+        log.warning("catalog_service_unavailable", error=str(exc), event_id=str(event_id))
+        raise _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "CATALOG_UNAVAILABLE",
+            "Event details are temporarily unavailable; please try again",
+        )
+    if resp.status_code == 404:
+        raise _error(status.HTTP_404_NOT_FOUND, "EVENT_NOT_FOUND", f"Event {event_id} not found")
+    if resp.status_code != 200:
+        raise _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "CATALOG_UNAVAILABLE",
+            "Event details are temporarily unavailable; please try again",
+        )
+
+    event = resp.json()
+    event_date = datetime.fromisoformat(str(event["event_date"]).replace("Z", "+00:00"))
+    if event_date.tzinfo is None:
+        event_date = event_date.replace(tzinfo=timezone.utc)
+    if event.get("status") != "PUBLISHED" or event_date <= _now():
+        reason = "has already started" if event_date <= _now() else f"is {str(event.get('status')).lower()}"
+        raise _error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "EVENT_NOT_BOOKABLE",
+            f"This event {reason} and can't be booked",
+            {"status": event.get("status"), "event_date": event_date.isoformat()},
+        )
+
+
 async def _fetch_seat_prices(
     event_id: uuid.UUID,
     seat_ids: List[uuid.UUID],
 ) -> dict[uuid.UUID, Decimal]:
-    """Fetch seat prices from the catalog service concurrently."""
+    """Check the event is bookable, then fetch seat prices concurrently."""
     async with httpx.AsyncClient(headers=internal_headers()) as client:
+        await _check_event_bookable(client, event_id)
         prices = await asyncio.gather(
             *(_get_seat_price(client, event_id, seat_id) for seat_id in seat_ids)
         )
@@ -185,8 +220,8 @@ async def lock_seats(
 
     Steps:
       1. Deduplicate seat_ids.
-      2. Reject seats already sold to a confirmed booking.
-      3. Fetch prices from catalog service (fails closed).
+      2. Check the event is bookable and fetch prices from catalog (fails closed).
+      3. Reject seats already sold to a confirmed booking.
       4. Atomically lock all seats in Redis (all-or-nothing).
       5. Persist Booking + BookingSeat rows + OutboxEvent in one transaction;
          if that fails, release the Redis locks rather than leak them.
@@ -209,6 +244,10 @@ async def lock_seats(
         seat_count=len(unique_seat_ids),
     )
 
+    # Event bookability + prices first: for a finished event "event is over"
+    # is the meaningful answer, even if a requested seat was sold back then.
+    prices = await _fetch_seat_prices(request.event_id, unique_seat_ids)
+
     booked = await _booked_seat_ids(db, request.event_id, unique_seat_ids)
     if booked:
         raise _error(
@@ -217,8 +256,6 @@ async def lock_seats(
             "One or more seats have already been sold",
             {"booked_seat_ids": sorted(str(s) for s in booked)},
         )
-
-    prices = await _fetch_seat_prices(request.event_id, unique_seat_ids)
 
     # Atomically lock all seats
     success, failed_idx = await lock_manager.lock_seats(
