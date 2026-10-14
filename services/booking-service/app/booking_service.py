@@ -875,8 +875,165 @@ async def expire_pending_bookings(
     return expired_count
 
 
+# ---------------------------------------------------------------------------
+# 8. Reconcile payments whose outcome was unknown
+# ---------------------------------------------------------------------------
+
+_RECONCILE_STATUSES = ("UNKNOWN", "REFUND_PENDING")
+
+
+async def _refund_attempt(
+    client: httpx.AsyncClient, booking: Booking, attempt: PaymentAttempt
+) -> None:
+    """Refund a charge for a seat we could not deliver. On any failure the
+    attempt stays REFUND_PENDING and the next pass retries."""
+    amount = Decimal(str(booking.total_amount)).quantize(Decimal("0.01"))
+    try:
+        resp = await client.post(
+            f"{settings.payment_service_url}/payments/{attempt.payment_intent_id}/refund",
+            json={"amount": str(amount), "reason": "Seat no longer available after delayed payment"},
+        )
+    except httpx.HTTPError as exc:
+        log.error("reconcile_refund_failed", booking_id=str(booking.id), error=str(exc))
+        return
+    # 409: the payment is no longer refundable, i.e. it was already refunded.
+    if resp.status_code in (200, 201, 409):
+        attempt.status = "REFUNDED"
+        log.warning("reconcile_payment_refunded", booking_id=str(booking.id), amount=str(amount))
+    else:
+        log.error("reconcile_refund_failed", booking_id=str(booking.id), status_code=resp.status_code)
+
+
+async def _reconcile_one(
+    db: AsyncSession, client: httpx.AsyncClient, lock_manager: LockManager, booking_id: uuid.UUID
+) -> bool:
+    result = await db.execute(
+        select(Booking)
+        .options(selectinload(Booking.seats), selectinload(Booking.payment_attempts))
+        .where(Booking.id == booking_id)
+        .with_for_update(skip_locked=True)  # a concurrent confirm owns it
+    )
+    booking = result.scalar_one_or_none()
+    if booking is None:
+        return False
+    attempt = next((a for a in booking.payment_attempts if a.status in _RECONCILE_STATUSES), None)
+    if attempt is None:
+        return False
+
+    if attempt.status == "REFUND_PENDING":
+        await _refund_attempt(client, booking, attempt)
+        return attempt.status == "REFUNDED"
+
+    payment_status = (
+        await _read_payment_status(client, attempt.payment_intent_id)
+        if attempt.payment_intent_id
+        else None
+    )
+    if payment_status is None:
+        return False  # still unknown; expiry handles a PENDING booking as usual
+
+    now = _now()
+    seat_ids = [s.seat_id for s in booking.seats]
+
+    if payment_status not in _PAYMENT_SUCCEEDED:
+        attempt.status = "FAILED"
+        if booking.status == "PENDING":
+            await lock_manager.release_seats(booking.event_id, seat_ids, booking.user_id)
+            booking.status = "FAILED"
+            booking.updated_at = now
+            db.add(
+                OutboxEvent(
+                    id=uuid.uuid4(),
+                    event_type="BOOKING_FAILED",
+                    payload={**_booking_payload(booking), "payment_status": payment_status},
+                )
+            )
+        log.info("reconcile_payment_failed", booking_id=str(booking.id))
+        return True
+
+    attempt.status = "SUCCEEDED"
+    if booking.status not in ("PENDING", "EXPIRED"):
+        return True
+
+    try:
+        async with db.begin_nested():
+            for seat_id in seat_ids:
+                db.add(SeatReservation(event_id=booking.event_id, seat_id=seat_id, booking_id=booking.id))
+    except IntegrityError:
+        # The hold lapsed and the seat was sold to someone else: the customer
+        # paid for a seat we can't give them, so refund them in full.
+        await lock_manager.release_seats(booking.event_id, seat_ids, booking.user_id)
+        booking.status = "FAILED"
+        booking.updated_at = now
+        attempt.status = "REFUND_PENDING"
+        db.add(
+            OutboxEvent(
+                id=uuid.uuid4(),
+                event_type="BOOKING_FAILED",
+                payload={**_booking_payload(booking), "reason": "SEAT_UNAVAILABLE_REFUNDED"},
+            )
+        )
+        await _refund_attempt(client, booking, attempt)
+        return True
+
+    await lock_manager.release_seats(booking.event_id, seat_ids, booking.user_id)
+    booking.status = "CONFIRMED"
+    booking.confirmed_at = now
+    booking.updated_at = now
+    db.add(
+        OutboxEvent(
+            id=uuid.uuid4(),
+            event_type="BOOKING_CONFIRMED",
+            payload={**_booking_payload(booking), "reconciled": True},
+        )
+    )
+    log.warning("reconcile_booking_confirmed", booking_id=str(booking.id))
+    return True
+
+
+async def reconcile_unknown_payments(session_factory, lock_manager: LockManager) -> int:
+    """Resolve PaymentAttempts left UNKNOWN by confirm_booking (and retry
+    pending refunds). Each booking is handled in its own transaction.
+
+    - payment SUCCEEDED -> booking CONFIRMED (even if its hold already
+      expired, provided the seats are still free); if the seats were sold
+      in the meantime, the charge is refunded in full and the booking FAILED
+    - payment FAILED    -> a PENDING booking becomes FAILED, seats released
+    - still unknown     -> left alone
+
+    Returns the number of attempts resolved.
+    """
+    async with session_factory() as db:
+        booking_ids = (
+            await db.execute(
+                select(PaymentAttempt.booking_id).where(PaymentAttempt.status.in_(_RECONCILE_STATUSES))
+            )
+        ).scalars().all()
+    if not booking_ids:
+        return 0
+
+    resolved = 0
+    async with httpx.AsyncClient(timeout=10.0, headers=internal_headers()) as client:
+        for booking_id in booking_ids:
+            try:
+                async with session_factory() as db:
+                    if await _reconcile_one(db, client, lock_manager, booking_id):
+                        resolved += 1
+                    await db.commit()
+            except Exception as exc:
+                log.error("payment_reconcile_error", booking_id=str(booking_id), error=str(exc))
+    if resolved:
+        log.info("payments_reconciled", count=resolved)
+    return resolved
+
+
 async def run_expiry_once(session_factory, lock_manager: LockManager) -> int:
-    """One expiry pass in its own transaction, committed on success."""
+    """One expiry pass, committed on success.
+
+    Unknown payment outcomes are reconciled first, so a booking that was in
+    fact paid for is confirmed rather than expired.
+    """
+    await reconcile_unknown_payments(session_factory, lock_manager)
     async with session_factory() as db:
         expired = await expire_pending_bookings(db, lock_manager)
         await db.commit()
